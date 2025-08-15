@@ -12,7 +12,8 @@ const webRoutes: FastifyPluginAsync = async (app) => {
     root: path.join(__dirname, '../../public'),
   });
 
-  app.get('/', async (_req, reply) => {
+  // change '/' to '/static' (or any other unique path)
+  app.get('/static', async (_req, reply) => {
     return reply.sendFile('index.html');
   });
 };
