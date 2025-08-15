@@ -41,3 +41,15 @@ model Signup {
   @@index([raidId])
   @@map("Signup")
 }
+
+model PlayerProfile {
+  id        String   @id @default(cuid())
+  guildId   String
+  userId    String
+  classKey  String    // e.g. PALADIN
+  specKey   String    // e.g. RETRIBUTION
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@unique([guildId, userId])
+}

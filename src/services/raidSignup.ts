@@ -1,137 +1,250 @@
+// src/services/raidSignup.ts
 import {
-  ActionRowBuilder, ButtonBuilder, ButtonStyle,
-  EmbedBuilder, Guild, TextBasedChannel, ButtonInteraction,
+  ActionRowBuilder, ButtonBuilder, ButtonInteraction, ButtonStyle,
+  StringSelectMenuBuilder, StringSelectMenuInteraction, EmbedBuilder, Guild,
 } from 'discord.js';
 import { prisma } from '../util/prisma.js';
-import { clampEmbedTitle } from './mapping.js';
+import { classSpecEmoji } from './profileIcons.js';
+import {
+  getPlayerProfile, upsertPlayerProfile, listClasses, listSpecs, isValidClassSpec,
+} from './playerProfile.js';
 
-export type SignupRole = 'TANK'|'HEALER'|'MELEE'|'RANGED'|'MAYBE'|'ABSENT';
+export type RoleKey = 'TANK'|'HEALER'|'MELEE'|'RANGED'|'MAYBE'|'ABSENT';
 
-export const roleEmoji: Record<SignupRole, string> = {
-  TANK: '🛡️', HEALER: '✨', MELEE: '⚔️', RANGED: '🏹', MAYBE: '❓', ABSENT: '⛔',
-};
+// ---------- Public API used by publishRaid.ts ----------
 
-export function rowsForRaid(raidId: string) {
-  return [
-    new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder().setCustomId(`raid:join:${raidId}:TANK`).setLabel('Tank').setEmoji('🛡️').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId(`raid:join:${raidId}:HEALER`).setLabel('Healer').setEmoji('✨').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId(`raid:join:${raidId}:MELEE`).setLabel('Melee').setEmoji('⚔️').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId(`raid:join:${raidId}:RANGED`).setLabel('Ranged').setEmoji('🏹').setStyle(ButtonStyle.Primary),
-    ),
-    new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder().setCustomId(`raid:join:${raidId}:MAYBE`).setLabel('Maybe').setEmoji('❓').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`raid:join:${raidId}:ABSENT`).setLabel('Absent').setEmoji('⛔').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`raid:leave:${raidId}`).setLabel('Leave').setEmoji('🚪').setStyle(ButtonStyle.Danger),
-    ),
-  ];
+const DEFAULT_DURATION_SEC = Number(process.env.RAID_EVENT_DEFAULT_DURATION_SEC ?? 3 * 3600);
+
+export function normalizeRole(role: string): RoleKey {
+  const u = (role ?? '').toUpperCase();
+  if (u === 'TANK' || u === 'HEALER' || u === 'MELEE' || u === 'RANGED' || u === 'MAYBE' || u === 'ABSENT') {
+    return u as RoleKey;
+  }
+  return 'MAYBE';
 }
 
-export async function loadSignups(raidId: string) {
-  return prisma.signup.findMany({
+
+// 1) wczytanie zapisów do embeda
+export async function loadSignups(raidId: string): Promise<Array<{ userId: string; username: string; role: RoleKey }>> {
+  const rows = await prisma.signup.findMany({
     where: { raidId },
     orderBy: { createdAt: 'asc' },
   });
+  return rows.map(r => ({
+    userId: r.userId,
+    username: r.username,
+    role: normalizeRole(r.role),
+  }));
 }
 
-function formatList(items: {userId: string, username: string}[], limit = 12) {
-  const pick = items.slice(0, limit);
-  const rest = Math.max(0, items.length - pick.length);
-  const body = pick.map(u => `• <@${u.userId}>`).join('\n') || '—';
-  return rest ? `${body}\n+${rest} more…` : body;
-}
 
+// 2) budowa embeda (nagłówek + listy roli)
 export function buildSignupEmbed(
-  raid: { raidId: string; raidTitle: string; difficulty: string; startAt: number; endAt?: number; notes?: string; },
-  caps?: { tank?: number; healer?: number; melee?: number; ranged?: number },
-  signups: { userId: string; username: string; role: string }[] = [],
+  meta: { raidId: string; raidTitle: string; difficulty: string; startAt: number; endAt: number; notes?: string },
+  caps: { tank?: number; healer?: number; melee?: number; ranged?: number } | undefined,
+  signups: Array<{ userId: string; username: string; role: RoleKey }>
 ) {
-  const groups: Record<SignupRole, {userId:string;username:string}[]> = {
+  const groups: Record<RoleKey, string[]> = {
     TANK: [], HEALER: [], MELEE: [], RANGED: [], MAYBE: [], ABSENT: [],
   };
   for (const s of signups) {
-    const r = (s.role || '').toUpperCase() as SignupRole;
-    if (groups[r]) groups[r].push({ userId: s.userId, username: s.username });
+    groups[s.role]?.push(s.username);
   }
 
+  const fmt = (arr: string[]) => arr.length ? arr.map(n => `• ${n}`).join('\n') : '—';
+
   const embed = new EmbedBuilder()
-    .setTitle(clampEmbedTitle(raid.raidTitle))
-    .setDescription(raid.notes || '')
+    .setTitle(meta.raidTitle)
+    .setDescription(meta.notes || '')
     .addFields(
-      { name: 'Difficulty', value: raid.difficulty || '—', inline: true },
-      { name: 'Start', value: `<t:${raid.startAt}:F>`, inline: true },
-      { name: 'End', value: raid.endAt ? `<t:${raid.endAt}:F>` : '—', inline: true },
+      { name: 'Difficulty', value: meta.difficulty || '—', inline: true },
+      { name: 'Start', value: `<t:${meta.startAt}:F> (<t:${meta.startAt}:R>)`, inline: true },
+      { name: 'End',   value: `<t:${meta.endAt}:t>`, inline: true },
     )
     .addFields(
-      { name: `${roleEmoji.TANK} Tank (${groups.TANK.length}${caps?.tank ? `/${caps.tank}` : ''})`, value: formatList(groups.TANK), inline: true },
-      { name: `${roleEmoji.MELEE} Melee (${groups.MELEE.length}${caps?.melee ? `/${caps.melee}` : ''})`, value: formatList(groups.MELEE), inline: true },
-      { name: `${roleEmoji.RANGED} Ranged (${groups.RANGED.length}${caps?.ranged ? `/${caps.ranged}` : ''})`, value: formatList(groups.RANGED), inline: true },
+      { name: `🛡️ Tank (${groups.TANK.length}${caps?.tank ? `/${caps.tank}` : ''})`, value: fmt(groups.TANK), inline: true },
+      { name: `✚ Healer (${groups.HEALER.length}${caps?.healer ? `/${caps.healer}` : ''})`, value: fmt(groups.HEALER), inline: true },
+      { name: `⚔️ Melee (${groups.MELEE.length}${caps?.melee ? `/${caps.melee}` : ''})`, value: fmt(groups.MELEE), inline: true },
     )
     .addFields(
-      { name: `${roleEmoji.HEALER} Healer (${groups.HEALER.length}${caps?.healer ? `/${caps.healer}` : ''})`, value: formatList(groups.HEALER), inline: true },
-      { name: `${roleEmoji.MAYBE} Maybe (${groups.MAYBE.length})`, value: formatList(groups.MAYBE), inline: true },
-      { name: `${roleEmoji.ABSENT} Absence (${groups.ABSENT.length})`, value: formatList(groups.ABSENT), inline: true },
+      { name: `🏹 Ranged (${groups.RANGED.length}${caps?.ranged ? `/${caps.ranged}` : ''})`, value: fmt(groups.RANGED), inline: true },
+      { name: `❔ Maybe (${groups.MAYBE.length})`, value: fmt(groups.MAYBE), inline: true },
+      { name: `🚫 Absent (${groups.ABSENT.length})`, value: fmt(groups.ABSENT), inline: true },
     )
-    .setFooter({ text: `RaidID: ${raid.raidId}` });
+    .setFooter({ text: `RaidID: ${meta.raidId}` });
 
   return embed;
 }
 
-// Button handler
+// 3) przyciski/wiersze do wiadomości raidu
+export function roleButtonsRow(raidId: string): ActionRowBuilder<ButtonBuilder> {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId(`signup:role:${raidId}:TANK`).setLabel('Tank').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`signup:role:${raidId}:HEALER`).setLabel('Healer').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`signup:role:${raidId}:MELEE`).setLabel('Melee').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`signup:role:${raidId}:RANGED`).setLabel('Ranged').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`signup:role:${raidId}:MAYBE`).setLabel('Maybe').setStyle(ButtonStyle.Secondary),
+  );
+}
+
+export function changeRoleRow(raidId: string): ActionRowBuilder<ButtonBuilder> {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId(`signup:changeRole:${raidId}`).setLabel('Change role').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`signup:role:${raidId}:ABSENT`).setLabel('Leave').setStyle(ButtonStyle.Danger),
+  );
+}
+
+export function rowsForRaid(raidId: string) {
+  return [roleButtonsRow(raidId), changeRoleRow(raidId)];
+}
+
+// ---------- Interaction handlers (button + select) ----------
+
 export async function handleSignupButton(i: ButtonInteraction, guild: Guild) {
-  if (!i.customId.startsWith('raid:')) return false;
+  if (!i.customId.startsWith('signup:')) return false;
 
-  const parts = i.customId.split(':'); // raid:join:RAIDID:ROLE  | raid:leave:RAIDID
-  const action = parts[1];
-  const raidId = parts[2];
-  const role = (parts[3] || '').toUpperCase() as SignupRole;
+  const parts = i.customId.split(':'); // signup:role:RAIDID:ROLE  /  signup:changeRole:RAIDID
+  const kind = parts[1];
 
-  const member = await guild.members.fetch(i.user.id).catch(() => null);
-  const username = member?.displayName || i.user.username;
-
-  if (action === 'leave') {
-    await prisma.signup.deleteMany({ where: { raidId, userId: i.user.id } });
-    await i.reply({ content: 'You have left this raid.', ephemeral: true });
-  } else if (action === 'join') {
-    if (!['TANK','HEALER','MELEE','RANGED','MAYBE','ABSENT'].includes(role)) {
-      await i.reply({ content: 'Unknown role.', ephemeral: true }); return true;
-    }
-    // upsert single signup per user
-    await prisma.signup.upsert({
-      where: { raidId_userId: { raidId, userId: i.user.id } },
-      create: { raidId, userId: i.user.id, username, role, status: 'JOINED' },
-      update: { username, role, status: 'JOINED' },
-    });
-    await i.reply({ content: `Signed as ${role}.`, ephemeral: true });
-  } else {
-    return false;
+  if (kind === 'changeRole') {
+    await i.reply({ content: 'Pick your new role:', components: [roleButtonsRow(parts[2])], ephemeral: true });
+    return true;
   }
 
-  // Refresh message embed
+  if (kind === 'role') {
+    const raidId = parts[2];
+    const role = (parts[3] as RoleKey) || 'MAYBE';
+    if (!raidId) {
+      await i.reply({ content: 'Cannot resolve raid context.', ephemeral: true });
+      return true;
+    }
+
+    // profile check
+    const profile = await getPlayerProfile(guild.id, i.user.id);
+    if (!profile) {
+      await i.reply({
+        content: `First time here! Pick your **class**:`,
+        components: [classSelectRow(raidId, role)],
+        ephemeral: true,
+      });
+      return true;
+    }
+
+    await upsertSignupWithProfile(i, guild, raidId, role, profile.classKey, profile.specKey);
+    await refreshSignupMessage(guild, raidId);
+    return true;
+  }
+
+  return false;
+}
+
+export async function handleProfileSelect(i: StringSelectMenuInteraction, guild: Guild) {
+  if (!i.customId.startsWith('profile:')) return false;
+  // profile:class:RAIDID:ROLE   or   profile:spec:RAIDID:ROLE:CLASS
+  const [, kind, raidId, role, cls] = i.customId.split(':');
+
+  if (kind === 'class') {
+    const pickedClass = i.values?.[0];
+    if (!pickedClass) return true;
+    await i.update({
+      content: `Class: **${pickedClass}** selected. Now choose **spec**:`,
+      components: [specSelectRow(raidId, role as RoleKey, pickedClass)],
+    });
+    return true;
+  }
+
+  if (kind === 'spec') {
+    const pickedSpec = i.values?.[0];
+    const pickedClass = cls!;
+    const roleKey = (role as RoleKey) ?? 'MAYBE';
+
+    if (!pickedClass || !pickedSpec || !isValidClassSpec(pickedClass, pickedSpec)) {
+      await i.reply({ content: `Invalid class/spec. Try again.`, ephemeral: true });
+      return true;
+    }
+
+    await upsertPlayerProfile(guild.id, i.user.id, pickedClass, pickedSpec);
+    await upsertSignupWithProfile(i, guild, raidId, roleKey, pickedClass, pickedSpec, true);
+    await refreshSignupMessage(guild, raidId);
+    return true;
+  }
+
+  return false;
+}
+
+// ---------- Private helpers ----------
+
+function classSelectRow(raidId: string, forRole: RoleKey) {
+  const classes = listClasses();
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`profile:class:${raidId}:${forRole}`)
+    .setPlaceholder('Choose your class')
+    .addOptions(classes.map(c => ({ label: c, value: c })));
+  return new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu);
+}
+
+function specSelectRow(raidId: string, forRole: RoleKey, classKey: string) {
+  const specs = listSpecs(classKey);
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`profile:spec:${raidId}:${forRole}:${classKey}`)
+    .setPlaceholder(`Choose spec for ${classKey}`)
+    .addOptions(specs.map(s => ({ label: s, value: s })));
+  return new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu);
+}
+
+async function upsertSignupWithProfile(
+  i: ButtonInteraction | StringSelectMenuInteraction,
+  guild: Guild,
+  raidId: string,
+  role: RoleKey,
+  classKey: string,
+  specKey: string,
+  updateMessage = false
+) {
+  await prisma.signup.upsert({
+    where: { raidId_userId: { raidId, userId: i.user.id } },
+    create: { raidId, userId: i.user.id, username: i.user.username, role },
+    update: { role },
+  });
+
+  const emoji = classSpecEmoji(classKey, specKey, role);
+  await i.reply({
+    content: `${emoji} Saved: **${role}** for **${i.user.username}** (${classKey}/${specKey}).`,
+    ephemeral: true,
+  });
+}
+
+export async function refreshSignupMessage(guild: Guild, raidId: string) {
   const raid = await prisma.raid.findUnique({ where: { raidId } });
-  if (!raid) return true;
+  if (!raid?.channelId || !raid?.messageId) return;
 
-  const channel = await guild.channels.fetch(raid.channelId).catch(() => null);
-  if (!channel || !channel.isTextBased() || !raid.messageId) return true;
+  const ch = await guild.channels.fetch(raid.channelId).catch(() => null);
+if (!ch || !(ch as any).isTextBased?.()) return;
+const channel = ch as any;
 
-  const msg = await (channel as TextBasedChannel).messages.fetch(raid.messageId).catch(() => null);
-  if (!msg) return true;
+
+const startSec = Math.floor(raid.startAt.getTime() / 1000);
+const endDate  = raid.endAt ?? new Date(raid.startAt.getTime() + DEFAULT_DURATION_SEC * 1000);
+const endSec   = Math.floor(endDate.getTime() / 1000);
+
 
   const signups = await loadSignups(raidId);
-  const caps = undefined as any; // if you store caps per raid, load them here
   const embed = buildSignupEmbed(
     {
       raidId,
       raidTitle: raid.raidTitle,
       difficulty: raid.difficulty,
-      startAt: Math.floor(raid.startAt.getTime()/1000),
-      endAt: raid.endAt ? Math.floor(raid.endAt.getTime()/1000) : undefined,
+      startAt: startSec,
+      endAt: endSec,
       notes: raid.notes || undefined,
     },
-    caps,
-    signups,
+    undefined,
+    signups as any
   );
+  const components = rowsForRaid(raidId);
 
-  await msg.edit({ embeds: [embed] });
-  return true;
+  const msg = await (ch as any).messages?.fetch?.(raid.messageId).catch(() => null);
+  if (msg) {
+    await msg.edit({ embeds: [embed], components }).catch(() => {});
+  }
 }

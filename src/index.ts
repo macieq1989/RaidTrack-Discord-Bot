@@ -4,22 +4,28 @@ import {
   type ChatInputCommandInteraction,
   type RESTPostAPIChatInputApplicationCommandsJSONBody,
   type ButtonInteraction,
+  type StringSelectMenuInteraction,
 } from 'discord.js';
 import { cfg } from './config.js';
 import { createWebServer } from './web.js';
 import * as RtImport from './commands/rt-import.js';
 import webRoutes from './routes/web.js'; // keep .js extension with NodeNext/ESM
 import { startSavedVariablesPoller } from './services/svPoller.js';
-import { handleSignupButton } from './services/raidSignup.js';
+import { handleSignupButton, handleProfileSelect } from './services/raidSignup.js';
 
-// Intents: Guilds (wymagane), GuildMembers (nazwy do embedów), GuildMessages (fetch/edytuj msg)
+// Intents: Guilds (required), GuildMembers (names for embeds), GuildMessages (fetch/edit msg)
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
   ],
-  partials: [Partials.GuildMember, Partials.Channel, Partials.Message],
+  partials: [
+    Partials.GuildMember,
+    Partials.Channel,
+    Partials.Message,
+    Partials.GuildScheduledEvent, // ok even if not strictly needed
+  ],
 });
 
 // === command module type ===
@@ -38,7 +44,7 @@ let app: ReturnType<typeof createWebServer> | null = null;
 client.once(Events.ClientReady, async (c) => {
   console.log(`Logged in as ${c.user.tag}`);
 
-  // Rejestr komend – jeśli jest guildId, rejestruj lokalnie (szybciej), w innym razie globalnie
+  // Slash commands registration
   try {
     const rest = new REST({ version: '10' }).setToken(cfg.token);
     if (cfg.guildId) {
@@ -69,36 +75,45 @@ client.once(Events.ClientReady, async (c) => {
 
 client.on(Events.InteractionCreate, async (i) => {
   try {
-    // najpierw przyciski zapisów:
+    // 1) Signup buttons (roles / change role)
     if (i.isButton()) {
-      if (i.guild) {
-        const handled = await handleSignupButton(i as ButtonInteraction, i.guild);
-        if (handled) return;
-      } else {
-        // brak gildii (DM?) – ignoruj
-        return;
-      }
+      if (!i.guild) return; // ignore DMs
+      const handled = await handleSignupButton(i as ButtonInteraction, i.guild);
+      if (handled) return;
     }
 
+    // 2) Profile selects (class/spec)
+    if (i.isStringSelectMenu()) {
+      if (!i.guild) return; // ignore DMs
+      const handled = await handleProfileSelect(i as StringSelectMenuInteraction, i.guild);
+      if (handled) return;
+    }
+
+    // 3) Slash commands
     if (!i.isChatInputCommand()) return;
     const cmd = router.get(i.commandName);
     if (!cmd) return;
-
     await cmd.execute(i);
   } catch (e) {
     console.error(e);
     if (i.isRepliable()) {
-      if ((i as any).deferred || (i as any).replied) await (i as any).editReply('Command failed.');
-      else await (i as any).reply({ content: 'Command failed.', ephemeral: true });
+      if ((i as any).deferred || (i as any).replied) {
+        await (i as any).editReply('Command failed.');
+      } else {
+        await (i as any).reply({ content: 'Command failed.', ephemeral: true });
+      }
     }
   }
 });
 
-process.on('SIGTERM', async () => {
-  console.log('SIGTERM: shutting down…');
+async function gracefulShutdown() {
+  console.log('Shutting down…');
   try { if (app) await app.close(); } catch {}
   try { client.destroy(); } catch {}
   process.exit(0);
-});
+}
+
+process.on('SIGTERM', gracefulShutdown);
+process.on('SIGINT', gracefulShutdown);
 
 client.login(cfg.token);
