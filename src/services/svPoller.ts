@@ -42,10 +42,13 @@ function tryExtractJsonExport(content: string, key: string): any | null {
 
 /** Lightweight reader for RaidTrackDB.raidInstances from Lua SavedVariables */
 function extractRaidInstancesFromLua(content: string): Array<Record<string, any>> {
-  // 1) Find start of 'raidInstances = {'
-  const m = content.match(/raidInstances\s*=\s*{/);
+  // Accept both: raidInstances = { ... }  and  ["raidInstances"] = { ... }
+  const reKey = /(?:\[\s*["']raidInstances["']\s*\]|\braidInstances\b)\s*=\s*{/;
+  const m = reKey.exec(content);
   if (!m) return [];
-  let i = (m.index ?? 0) + m[0].length; // position after the opening '{'
+
+  // position right after the opening '{' of the value
+  let i = (m.index ?? 0) + m[0].length;
 
   // 2) Find the matching closing '}' for the raidInstances block (brace counting)
   let depth = 1;
