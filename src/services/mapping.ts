@@ -38,12 +38,42 @@ export function clampDescription(s?: string): string | undefined {
 }
 
 /** Normalize difficulty to uppercase + common aliases */
-export function normalizeDifficulty(d: string): string {
-  const v = (d || '').trim().toUpperCase();
-  if (v === 'N' || v === 'NORMAL') return 'NORMAL';
-  if (v === 'H' || v === 'HEROIC') return 'HEROIC';
-  if (v === 'M' || v === 'MYTHIC') return 'MYTHIC';
-  return v; // pass-through for presets like "SUNWEL" etc.
+export function normalizeDifficultyLabel(s?: string): Difficulty {
+  const x = String(s || '').trim().toLowerCase();
+  if (!x) return 'NORMAL';
+  if (x.startsWith('myth')) return 'MYTHIC';
+  if (x.startsWith('hero') || x === 'hc') return 'HEROIC';
+  // traktujemy „normal”, „norm”, a także „10/25 Player”, „lfr” jako NORMAL na potrzeby routingu
+  return 'NORMAL';
+}
+
+/** derive difficulty from selectedDifficulty or from bosses EP sums */
+export function deriveDifficultyFromPresetConfig(cfg?: {
+  selectedDifficulty?: string;
+  bosses?: Record<string, Record<string, number>>;
+}): Difficulty {
+  if (!cfg) return 'NORMAL';
+
+  if (cfg.selectedDifficulty) {
+    return normalizeDifficultyLabel(cfg.selectedDifficulty);
+  }
+
+  // fallback: zsumuj EP per diff w 'bosses'
+  let sumN = 0, sumH = 0, sumM = 0;
+  const bosses = cfg.bosses || {};
+  for (const boss of Object.values(bosses)) {
+    // boss: { Normal: 23, Heroic: 0, Mythic: 0, ... }
+    for (const [k, v] of Object.entries(boss || {})) {
+      const n = Number(v) || 0;
+      const key = k.trim().toLowerCase();
+      if (key.startsWith('myth')) sumM += n;
+      else if (key.startsWith('hero')) sumH += n;
+      else if (key.startsWith('norm') || key.includes('player') || key === 'lfr') sumN += n;
+    }
+  }
+  if (sumM > 0) return 'MYTHIC';
+  if (sumH > 0) return 'HEROIC';
+  return 'NORMAL';
 }
 
 /** Ensure we keep unix seconds as an integer >= 0 */

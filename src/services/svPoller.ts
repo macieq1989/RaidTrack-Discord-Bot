@@ -3,6 +3,7 @@ import fs from 'fs/promises';
 import type { Client, Guild } from 'discord.js';
 import { publishOrUpdateRaid } from './publishRaid.js';
 import { cfg } from '../config.js';
+import { deriveDifficultyFromPresetConfig } from './mapping.js';
 
 export type SVPollerStatus = {
   filePath: string;
@@ -20,6 +21,12 @@ const status: SVPollerStatus = {
   key: '',
   intervalMs: 60000,
 };
+
+// cache of preset -> { selectedDifficulty, bosses{ boss -> { diff: value } } }
+let lastPresetConfigMap: Record<
+  string,
+  { selectedDifficulty?: string; bosses?: Record<string, Record<string, number>> }
+> = {};
 
 // default duration for endAt when SV does not provide "ended"
 const DEFAULT_DURATION_SEC = Number(process.env.RAID_EVENT_DEFAULT_DURATION_SEC ?? 3 * 3600);
@@ -50,7 +57,7 @@ function tryExtractJsonExport(content: string, key: string): any | null {
   return JSON.parse(raw);
 }
 
-/** Lightweight reader for RaidTrackDB.raidInstances from Lua SavedVariables */
+/** Extract RaidTrackDB.raidInstances from Lua SavedVariables */
 function extractRaidInstancesFromLua(content: string): Array<Record<string, any>> {
   // Accept both: raidInstances = { ... }  and  ["raidInstances"] = { ... }
   const reKey = /(?:\[\s*["']raidInstances["']\s*\]|\braidInstances\b)\s*=\s*{/;
@@ -132,12 +139,114 @@ function extractRaidInstancesFromLua(content: string): Array<Record<string, any>
   return parsed;
 }
 
-/** Map a minimal raid object from Lua -> our ingest format */
+/** Extract RaidTrackDB.raidPresets -> minimal config for difficulty derivation */
+function extractRaidPresetsConfig(content: string): Record<
+  string,
+  { selectedDifficulty?: string; bosses?: Record<string, Record<string, number>> }
+> {
+  const result: Record<
+    string,
+    { selectedDifficulty?: string; bosses?: Record<string, Record<string, number>> }
+  > = {};
+
+  // find raidPresets = { ... } or ["raidPresets"] = { ... }
+  const reRoot = /(?:\[\s*["']raidPresets["']\s*\]|\braidPresets\b)\s*=\s*{/;
+  const m = reRoot.exec(content);
+  if (!m) return result;
+
+  let i = m.index + m[0].length;
+  let depth = 1, end = i;
+  for (; end < content.length; end++) {
+    const ch = content[end];
+    if (ch === '{') depth++;
+    else if (ch === '}') { depth--; if (depth === 0) { end++; break; } }
+  }
+  const block = content.slice(i, end - 1);
+
+  // iterate entries: ["<preset>"] = { ... }
+  const entryRe = /\[\s*"([^"]+)"\s*\]\s*=\s*{/g;
+  let em: RegExpExecArray | null;
+  while ((em = entryRe.exec(block)) !== null) {
+    const presetName = em[1].trim().toLowerCase();
+    let j = em.index + em[0].length;
+
+    // balance to end of this preset object
+    let d = 1, k = j;
+    for (; k < block.length; k++) {
+      const ch2 = block[k];
+      if (ch2 === '{') d++;
+      else if (ch2 === '}') { d--; if (d === 0) { k++; break; } }
+    }
+    const entry = block.slice(j, k - 1);
+
+    const cfg: { selectedDifficulty?: string; bosses?: Record<string, Record<string, number>> } = {};
+
+    // selectedDifficulty = "Heroic"
+    const dm = entry.match(/(?:\[\s*"selectedDifficulty"\s*\]|\bselectedDifficulty\b)\s*=\s*"([^"]+)"/i);
+    if (dm) cfg.selectedDifficulty = dm[1].trim();
+
+    // bosses = { ["Boss"] = { ["Heroic"]=111, ["Normal"]=0, ... }, ... }
+    const bossesRoot = /(?:\[\s*"bosses"\s*\]|\bbosses\b)\s*=\s*{/i.exec(entry);
+    if (bossesRoot) {
+      const bosses: Record<string, Record<string, number>> = {};
+      let bStart = (bossesRoot.index ?? 0) + bossesRoot[0].length;
+      let bd = 1, bEnd = bStart;
+      for (; bEnd < entry.length; bEnd++) {
+        const ch3 = entry[bEnd];
+        if (ch3 === '{') bd++;
+        else if (ch3 === '}') { bd--; if (bd === 0) { bEnd++; break; } }
+      }
+      const bossesBlock = entry.slice(bStart, bEnd - 1);
+
+      const bossRe = /\[\s*"([^"]+)"\s*\]\s*=\s*{/g;
+      let bm: RegExpExecArray | null;
+      while ((bm = bossRe.exec(bossesBlock)) !== null) {
+        const bossName = bm[1];
+        let bj = bm.index + bm[0].length;
+
+        let dd = 1, bk = bj;
+        for (; bk < bossesBlock.length; bk++) {
+          const ch4 = bossesBlock[bk];
+          if (ch4 === '{') dd++;
+          else if (ch4 === '}') { dd--; if (dd === 0) { bk++; break; } }
+        }
+        const diffBlock = bossesBlock.slice(bj, bk - 1);
+
+        const diffMap: Record<string, number> = {};
+        const diffRe = /\[\s*"([^"]+)"\s*\]\s*=\s*([0-9]+)/g;
+        let dm2: RegExpExecArray | null;
+        while ((dm2 = diffRe.exec(diffBlock)) !== null) {
+          diffMap[dm2[1]] = Number(dm2[2] || 0);
+        }
+        if (Object.keys(diffMap).length) bosses[bossName] = diffMap;
+
+        bossRe.lastIndex = bk; // jump past this boss
+      }
+      if (Object.keys(bosses).length) cfg.bosses = bosses;
+    }
+
+    result[presetName] = cfg;
+    entryRe.lastIndex = k; // jump past this preset
+  }
+
+  return result;
+}
+
+/** Map a minimal raid object from Lua -> our ingest format; difficulty from preset config */
 function mapLuaRaidToIngest(raid: Record<string, any>) {
-  // fields seen: id, name, started, ended, status, preset, scheduledAt, scheduledDate
+  // fields seen: id, name, started, ended, status, preset, scheduledAt, scheduledDate, presetName
   const raidId = String(raid.id ?? raid.name ?? `rt-${Date.now()}`);
   const raidTitle = String(raid.name ?? 'Raid');
-  const difficulty = String(raid.preset ?? 'Normal');
+
+  const presetKey = String(raid.preset ?? raid.presetName ?? '').trim().toLowerCase();
+  const presetCfg =
+    presetKey && lastPresetConfigMap[presetKey]
+      ? lastPresetConfigMap[presetKey]
+      : undefined;
+
+  // difficulty strictly derived from preset configuration
+  const difficulty = deriveDifficultyFromPresetConfig(presetCfg);
+
   const startAt = Number(raid.started ?? raid.scheduledAt ?? 0);
 
   // ensure endAt for Discord external events
@@ -149,6 +258,7 @@ function mapLuaRaidToIngest(raid: Record<string, any>) {
   const notesParts: string[] = [];
   if (raid.status) notesParts.push(`status:${raid.status}`);
   if (raid.scheduledDate) notesParts.push(`date:${raid.scheduledDate}`);
+  if (raid.preset ?? raid.presetName) notesParts.push(`preset:${raid.preset ?? raid.presetName}`);
   if (raid.ended) notesParts.push(`ended:${raid.ended}`);
   const notes = notesParts.join(' | ') || undefined;
 
@@ -199,6 +309,17 @@ export function startSavedVariablesPoller(
       return;
     }
 
+    // update preset->config map (raidPresets) first, for routing
+    try {
+      const m = extractRaidPresetsConfig(text);
+      if (Object.keys(m).length) {
+        lastPresetConfigMap = m;
+        // console.log('[SV] raidPresets parsed:', Object.keys(m).length);
+      }
+    } catch {
+      // non-fatal
+    }
+
     // Mode A: JSON export under SV key
     try {
       const json = tryExtractJsonExport(text, key);
@@ -244,11 +365,16 @@ export function startSavedVariablesPoller(
 
       let count = 0;
       for (const r of raids) {
-        const payload = mapLuaRaidToIngest(r);
-        if (!payload.startAt) continue; // basic sanity
-        const guild: Guild = await client.guilds.fetch(String(defaultGuildId));
-        await publishOrUpdateRaid(guild, payload as any);
-        count++;
+        try {
+          const payload = mapLuaRaidToIngest(r);
+          if (!payload.startAt) continue; // basic sanity
+          const guild: Guild = await client.guilds.fetch(String(defaultGuildId));
+          await publishOrUpdateRaid(guild, payload as any);
+          count++;
+        } catch (e: any) {
+          // if a single entry fails to map (e.g., missing preset config), skip it
+          console.warn('[SV] skip raid due to mapping error:', e?.message ?? e);
+        }
       }
       status.lastProcessedCount = count;
       if (!count) status.lastError = 'no valid raids mapped from Lua SV';
