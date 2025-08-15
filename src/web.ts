@@ -5,6 +5,7 @@ import cookie from '@fastify/cookie';
 import { publishOrUpdateRaid } from './services/publishRaid.js';
 import { cfg } from './config.js';
 import { z } from 'zod';
+import { getSVPollerStatus } from './services/svPoller.js';
 import type { Client, Guild } from 'discord.js';
 import {
   buildAuthUrl,
@@ -71,6 +72,8 @@ export function createWebServer(client: Client): FastifyInstance {
 
   // Health
   app.get('/health', async () => ({ ok: true }));
+  app.get('/api/sv-status', async () => getSVPollerStatus());
+
 
   // Landing (pretty)
   app.get('/', async (_req, reply) => {

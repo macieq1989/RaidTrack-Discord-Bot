@@ -3,6 +3,8 @@ import { cfg } from './config.js';
 import { createWebServer } from './web.js';
 import * as RtImport from './commands/rt-import.js';
 import webRoutes from './routes/web.js'; // keep .js extension with NodeNext/ESM
+import { startSavedVariablesPoller } from './services/svPoller.js';
+
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -32,6 +34,14 @@ client.once(Events.ClientReady, async (c) => {
 
   await app.listen({ port: cfg.port, host: '0.0.0.0' });
   console.log(`HTTP on :${cfg.port}`);
+
+  startSavedVariablesPoller(client, {
+    filePath: process.env.SV_FILE || '/data/RaidTrack.lua',
+    key: process.env.SV_EXPORT_KEY || 'RaidTrackExport',
+    intervalMs: Number(process.env.SV_POLL_MS ?? 60000),
+  });
+  console.log('[SV] poller started');
+
 });
 
 client.on(Events.InteractionCreate, async (i) => {
