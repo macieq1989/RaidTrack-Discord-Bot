@@ -3,6 +3,7 @@ import { cfg } from './config.js';
 import { createWebServer } from './web.js';
 import * as RtImport from './commands/rt-import.js';
 
+
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 const commands = [RtImport.data.toJSON()];

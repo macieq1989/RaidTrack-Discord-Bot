@@ -7,7 +7,8 @@ import {
 } from 'discord.js';
 import { cfg } from '../config.js';
 import { clampEmbedTitle, clampEventTitle, RaidPayload } from './mapping.js';
-import { prisma } from '../util/prisma';
+import { prisma } from '../util/prisma.js';
+
 
 // Resolve channel based on difficulty
 function resolveChannelId(diff: string): string {

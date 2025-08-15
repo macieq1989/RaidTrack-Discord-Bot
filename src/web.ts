@@ -1,8 +1,8 @@
 import Fastify, { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import cookie from '@fastify/cookie';
-import { cfg } from './config.js';
 import { publishOrUpdateRaid } from './services/publishRaid.js';
+import { cfg } from './config.js';
 import { z } from 'zod';
 import type { Client, Guild } from 'discord.js';
 import { buildAuthUrl, exchangeCodeForToken, fetchUser, fetchMember, createSessionJwt, verifySessionJwt } from './auth/discordOAuth.js';
