@@ -13,16 +13,31 @@ model Raid {
   raidTitle        String
   difficulty       String
   startAt          DateTime
-  endAt            DateTime?         // optional; uzupełniamy fallbackiem w kodzie
-  notes            String?           // opcjonalne; w kodzie dajesz '' gdy brak
+  endAt            DateTime?
+  notes            String?
   channelId        String
-  messageId        String?   @unique // ID wiadomości Discorda jest globalnie unikalne
-  scheduledEventId String?   @unique // ID eventu Discorda też jest globalnie unikalne
-
+  messageId        String?   @unique
+  scheduledEventId String?   @unique
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
   @@map("Raid")
   @@index([startAt])
   @@index([channelId])
+}
+
+
+model Signup {
+  id        String   @id @default(cuid())
+  raidId    String
+  userId    String
+  username  String
+  role      String   // TANK | HEALER | MELEE | RANGED | MAYBE | ABSENT
+  status    String   @default("JOINED")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([raidId, userId])  // pozwala na upsert po (raidId,userId)
+  @@index([raidId])
+  @@map("Signup")
 }

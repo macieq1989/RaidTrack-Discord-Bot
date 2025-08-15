@@ -6,15 +6,15 @@ export const cfg = {
   guildId: process.env.DISCORD_GUILD_ID ?? '',
   port: Number(process.env.PORT ?? 8080),
   databaseUrl: process.env.DATABASE_URL ?? 'file:./data/db.sqlite',
-  tz: process.env.TZ ?? 'Europe/Warsaw',
+  tz: process.env.TZ ?? 'Europe/London',
 
   // Routing kanałów
+  fallbackChannel: process.env.CH_FALLBACK || process.env.FALLBACK_CHANNEL_ID || '',
   channelRouting: {
-    NORMAL: process.env.CH_NORMAL ?? '',
-    HEROIC: process.env.CH_HEROIC ?? '',
-    MYTHIC: process.env.CH_MYTHIC ?? ''
+    NORMAL: process.env.CH_NORMAL || '',
+    HEROIC: process.env.CH_HEROIC || '',
+    MYTHIC: process.env.CH_MYTHIC || '',
   },
-  fallbackChannel: process.env.CH_FALLBACK ?? '',
 
   // OAuth / Web
   publicUrl: process.env.PUBLIC_URL ?? '',
