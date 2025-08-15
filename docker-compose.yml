@@ -6,7 +6,7 @@ services:
     env_file: [.env]
     volumes:
       - ./data:/app/data
-      - /mnt/wow-sv/RaidTrack.lua:/data/RaidTrack.lua:ro
+      - /mnt/wow-sv:/data/sv:ro
     ports:
       - "19000:18080"
     healthcheck:
@@ -15,5 +15,5 @@ services:
       timeout: 3s
       retries: 3 
     environment:
-      - SV_FILE=/data/RaidTrack.lua
+      - SV_FILE=/data/sv/RaidTrack.lua
       - SV_EXPORT_KEY=RaidTrackExport
