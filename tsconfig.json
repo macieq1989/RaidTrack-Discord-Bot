@@ -8,6 +8,6 @@
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "types": ["node"]         // ← to usuwa błędy z 'process'
+    "types": ["node"]
   }
 }
