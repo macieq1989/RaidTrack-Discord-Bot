@@ -1,5 +1,5 @@
 import Fastify from 'fastify';
-import rateLimit from 'fastify-rate-limit';
+import rateLimit from '@fastify/rate-limit';
 import { cfg } from './config.js';
 import { publishOrUpdateRaid } from './services/publishRaid.js';
 import { z } from 'zod';
