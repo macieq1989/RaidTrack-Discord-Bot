@@ -3,23 +3,26 @@ generator client {
   binaryTargets = ["native", "debian-openssl-3.0.x"]
 }
 
-
-
 datasource db {
   provider = "sqlite"
   url      = env("DATABASE_URL")
 }
 
 model Raid {
-  raidId           String @id
+  raidId           String    @id
   raidTitle        String
   difficulty       String
   startAt          DateTime
-  notes            String
+  endAt            DateTime?         // optional; uzupełniamy fallbackiem w kodzie
+  notes            String?           // opcjonalne; w kodzie dajesz '' gdy brak
   channelId        String
-  messageId        String?
-  scheduledEventId String?
+  messageId        String?   @unique // ID wiadomości Discorda jest globalnie unikalne
+  scheduledEventId String?   @unique // ID eventu Discorda też jest globalnie unikalne
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@map("Raid")
+  @@index([startAt])
+  @@index([channelId])
 }

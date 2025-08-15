@@ -21,6 +21,9 @@ const status: SVPollerStatus = {
   intervalMs: 60000,
 };
 
+// default duration for endAt when SV does not provide "ended"
+const DEFAULT_DURATION_SEC = Number(process.env.RAID_EVENT_DEFAULT_DURATION_SEC ?? 3 * 3600);
+
 function unescapeLuaQuotedString(s: string): string {
   return s
     .replace(/\\n/g, '\n')
@@ -30,9 +33,16 @@ function unescapeLuaQuotedString(s: string): string {
     .replace(/\\\\/g, '\\');
 }
 
-/** Try JSON export under a given SV key: key = "....json..." or key = [[ json ]] */
+function escapeRegExp(lit: string) {
+  return lit.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Try JSON export under a given SV key: supports key = "..." and ["key"] = "..." (or [[ ... ]]) */
 function tryExtractJsonExport(content: string, key: string): any | null {
-  const re = new RegExp(`${key}\\s*=\\s*(?:"((?:\\\\.|[^"\\\\])*)"|\\[\\[([\\s\\S]*?)\\]\\])`);
+  const k = escapeRegExp(key);
+  const re = new RegExp(
+    `(?:\\[\\s*["']${k}["']\\s*\\]|\\b${k}\\b)\\s*=\\s*(?:"((?:\\\\.|[^"\\\\])*)"|\\[\\[([\\s\\S]*?)\\]\\])`
+  );
   const m = content.match(re);
   if (!m) return null;
   const raw = m[1] != null ? unescapeLuaQuotedString(m[1]) : (m[2] ?? '');
@@ -50,7 +60,7 @@ function extractRaidInstancesFromLua(content: string): Array<Record<string, any>
   // position right after the opening '{' of the value
   let i = (m.index ?? 0) + m[0].length;
 
-  // 2) Find the matching closing '}' for the raidInstances block (brace counting)
+  // Find the matching closing '}' for the raidInstances block (brace counting)
   let depth = 1;
   let end = i;
   for (; end < content.length; end++) {
@@ -63,19 +73,14 @@ function extractRaidInstancesFromLua(content: string): Array<Record<string, any>
   }
   const block = content.slice(i, end - 1); // inner of raidInstances { ... }
 
-  // 3) Within the block, each top-level `{ ... }` is a raid entry. Collect them.
+  // Within the block, each top-level `{ ... }` is a raid entry. Collect them.
   const raids: string[] = [];
   let j = 0;
   while (j < block.length) {
-    // skip whitespace and commas
     while (j < block.length && /[\s,]/.test(block[j])) j++;
     if (j >= block.length) break;
-    if (block[j] !== '{') {
-      // not an entry, move forward cautiously
-      j++;
-      continue;
-    }
-    // parse a balanced { ... }
+    if (block[j] !== '{') { j++; continue; }
+
     let d = 1;
     let k = j + 1;
     for (; k < block.length; k++) {
@@ -90,7 +95,7 @@ function extractRaidInstancesFromLua(content: string): Array<Record<string, any>
     j = k;
   }
 
-  // 4) For each mini-block, parse simple key/value pairs like ["name"] = "x", ["id"]=123,
+  // Parse simple key/value pairs like ["name"] = "x", ["id"]=123,
   const parsed: Array<Record<string, any>> = [];
   for (const rb of raids) {
     const obj: Record<string, any> = {};
@@ -107,7 +112,6 @@ function extractRaidInstancesFromLua(content: string): Array<Record<string, any>
       // Convert Lua literals to JS
       let value: any;
       if (vRaw.startsWith('"')) {
-        // string
         const str = vRaw.replace(/^"/, '').replace(/"$/, '');
         value = unescapeLuaQuotedString(str);
       } else if (/^(true|false)$/i.test(vRaw)) {
@@ -130,23 +134,25 @@ function extractRaidInstancesFromLua(content: string): Array<Record<string, any>
 
 /** Map a minimal raid object from Lua -> our ingest format */
 function mapLuaRaidToIngest(raid: Record<string, any>) {
-  // fields seen in your SV: id, name, started, ended, status, preset, scheduledAt, scheduledDate
+  // fields seen: id, name, started, ended, status, preset, scheduledAt, scheduledDate
   const raidId = String(raid.id ?? raid.name ?? `rt-${Date.now()}`);
   const raidTitle = String(raid.name ?? 'Raid');
   const difficulty = String(raid.preset ?? 'Normal');
   const startAt = Number(raid.started ?? raid.scheduledAt ?? 0);
+
+  // ensure endAt for Discord external events
+  const endAt =
+    raid.ended != null
+      ? Number(raid.ended)
+      : (startAt ? startAt + DEFAULT_DURATION_SEC : undefined);
+
   const notesParts: string[] = [];
   if (raid.status) notesParts.push(`status:${raid.status}`);
+  if (raid.scheduledDate) notesParts.push(`date:${raid.scheduledDate}`);
   if (raid.ended) notesParts.push(`ended:${raid.ended}`);
   const notes = notesParts.join(' | ') || undefined;
 
-  return {
-    raidId,
-    raidTitle,
-    difficulty,
-    startAt,
-    notes,
-  };
+  return { raidId, raidTitle, difficulty, startAt, endAt, notes };
 }
 
 export function startSavedVariablesPoller(
@@ -238,7 +244,6 @@ export function startSavedVariablesPoller(
 
       let count = 0;
       for (const r of raids) {
-        // Publish only meaningful/updated entries; here we publish all entries on change.
         const payload = mapLuaRaidToIngest(r);
         if (!payload.startAt) continue; // basic sanity
         const guild: Guild = await client.guilds.fetch(String(defaultGuildId));
@@ -246,11 +251,7 @@ export function startSavedVariablesPoller(
         count++;
       }
       status.lastProcessedCount = count;
-      if (count) {
-        // ok
-      } else {
-        status.lastError = 'no valid raids mapped from Lua SV';
-      }
+      if (!count) status.lastError = 'no valid raids mapped from Lua SV';
     } catch (e: any) {
       status.lastError = `lua parse/publish failed: ${e.message}`;
     }
