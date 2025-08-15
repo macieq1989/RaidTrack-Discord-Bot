@@ -1,6 +1,6 @@
 services:
   raidtrack-bot:
-    image: ghcr.io/YOUR_GH_USERNAME/raidtrack-discord-bot:latest
+    image: ghcr.io/macieq1989/raidtrack-discord-bot:latest
     container_name: raidtrack-bot
     restart: unless-stopped
     env_file:
