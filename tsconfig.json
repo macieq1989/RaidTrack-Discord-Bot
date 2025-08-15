@@ -1,13 +1,10 @@
 {
   "compilerOptions": {
-    "target": "ES2022",
-    "module": "ES2022",
     "moduleResolution": "Bundler",
-    "outDir": "dist",
-    "rootDir": "src",
-    "strict": true,
-    "esModuleInterop": true,
+    "module": "ES2022",
+    "target": "ES2022",
+    "types": ["node"],
     "skipLibCheck": true,
-    "types": ["node"]
+    "strict": true
   }
 }
