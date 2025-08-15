@@ -1,0 +1,16 @@
+services:
+  raidtrack-bot:
+    image: ghcr.io/YOUR_GH_USERNAME/raidtrack-discord-bot:latest
+    container_name: raidtrack-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
