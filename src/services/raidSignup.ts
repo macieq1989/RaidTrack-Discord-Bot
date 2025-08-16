@@ -53,13 +53,12 @@ function keyFor(cls?: string, spec?: string) {
 function toEmojiToken(name: string, value: string): string | null {
   const v = (value ?? '').trim();
   if (!v) return null;
-  if (/^<a?:[^:>]+:\d+>$/.test(v)) return v;        // already full token
-  const m = /^a:(\d+)$/.exec(v);                    // "a:ID" -> animated
-  if (m) return `<a:${name}:${m[1]}>`;
-  if (/^\d+$/.test(v)) return `<:${name}:${v}>`;     // plain ID -> static
+  if (/^<a?:[^:>]+:\d+>$/.test(v)) return v;          // pełny token
+  const m = /^a:(\d+)$/.exec(v); if (m) return `<a:${name}:${m[1]}>`; // anim
+  if (/^\d+$/.test(v)) return `<:${name}:${v}>`;       // statyczne ID
   return null;
 }
-/** If someone zwrócił ':name:' – naprawiamy do '<:name:ID>' używając mapy z .env */
+/** Zamienia ':class_spec:' -> '<:class_spec:ID>' jeśli mamy ID w cfg.customEmoji */
 function ensureEmojiToken(maybe: string, cls?: string, spec?: string): string {
   if (/^:[^:]+:$/.test((maybe ?? '').trim())) {
     const k = keyFor(cls, spec);
@@ -69,6 +68,7 @@ function ensureEmojiToken(maybe: string, cls?: string, spec?: string): string {
   }
   return maybe;
 }
+
 
 
 const DEFAULT_DURATION_SEC = Number(process.env.RAID_EVENT_DEFAULT_DURATION_SEC ?? 3 * 3600);
@@ -197,6 +197,7 @@ function fmtPlayers(arr: Array<{username: string; classKey?: string; specKey?: s
     return `${icon} ${p.username}`;
   }).join('\n');
 }
+
 
 
 export function buildSignupEmbed(
