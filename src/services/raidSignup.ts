@@ -41,23 +41,36 @@ export async function loadSignups(
   }
 
   const userIds = Array.from(new Set(rows.map(r => r.userId)));
+
+  // Bierzemy pełne rekordy (bez select), a potem czytamy alias z różnych możliwych pól.
   const profiles = await prisma.playerProfile.findMany({
     where: { guildId, userId: { in: userIds } },
-    select: { userId: true, classKey: true, specKey: true },
   });
-  const pmap = new Map(profiles.map(p => [p.userId, p]));
+
+  // Mapujemy jako 'any', żeby TS nie krzyczał o nieistniejące pola (serverAlias/characterName itd.)
+  const pmap = new Map<string, any>(profiles.map((p: any) => [p.userId, p]));
 
   return rows.map(r => {
-    const p = pmap.get(r.userId);
+    const p: any = pmap.get(r.userId);
+    // Preferencja aliasu (podstaw tu realną nazwę jeśli masz jedną konkretną w schemacie)
+    const alias =
+      p?.serverAlias ??
+      p?.characterName ??
+      p?.ingameName ??
+      p?.wowAlias ??
+      p?.displayName ??
+      r.username;
+
     return {
       userId: r.userId,
-      username: r.username,
+      username: alias,                    // <-- teraz w embedzie poleci alias zamiast nicku Discord
       role: normalizeRole(r.role),
       classKey: p?.classKey || undefined,
       specKey: p?.specKey || undefined,
     };
   });
 }
+
 
 export function toGroupedSignups(
   list: Array<{ userId: string; username: string; role: RoleKey; classKey?: string; specKey?: string; }>

@@ -142,8 +142,8 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
   const diffIcon = await tryBuildDiffIconAttachment(payload.difficulty);
   if (diffIcon) {
     // Must reference by the exact name we passed to AttachmentBuilder
-    embed.setThumbnail('attachment://raid-diff.png');
-    files.push(diffIcon);
+   // embed.setThumbnail('attachment://raid-diff.png');
+   // files.push(diffIcon);
   }
 
   const components = rowsForRaid(payload.raidId);
