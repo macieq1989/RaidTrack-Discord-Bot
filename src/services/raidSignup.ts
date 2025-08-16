@@ -4,8 +4,6 @@ import {
 } from 'discord.js';
 import { prisma } from '../util/prisma.js';
 import { classSpecEmoji } from './profileIcons.js';
-// leave import below if you still queue image refresh elsewhere; safe if unused
-import { queueRosterRefresh } from './rosterRefresh.js';
 import type { PlayerEntry, SignupsGrouped } from './rosterImage.js';
 
 import {
@@ -183,7 +181,7 @@ export function rowsForRaid(raidId: string) {
 export async function handleSignupButton(i: ButtonInteraction, guild: Guild) {
   if (!i.customId.startsWith('signup:') && !i.customId.startsWith('profile:change:')) return false;
 
-  // allow changing class/spec explicitly
+  // explicit change class/spec
   if (i.customId.startsWith('profile:change:')) {
     const raidId = i.customId.split(':')[2];
     const current = await prisma.signup.findUnique({
@@ -227,8 +225,6 @@ export async function handleSignupButton(i: ButtonInteraction, guild: Guild) {
 
     await upsertSignupWithProfile(i, guild, raidId, role, profile.classKey, profile.specKey);
     await refreshSignupMessage(guild, raidId);
-    try { queueRosterRefresh(guild, raidId); } catch {}
-
     return true;
   }
 
@@ -263,8 +259,6 @@ export async function handleProfileSelect(i: StringSelectMenuInteraction, guild:
     await upsertPlayerProfile(guild.id, i.user.id, pickedClass, pickedSpec);
     await upsertSignupWithProfile(i, guild, raidId, roleKey, pickedClass, pickedSpec, true);
     await refreshSignupMessage(guild, raidId);
-    try { queueRosterRefresh(guild, raidId); } catch {}
-
     return true;
   }
 
@@ -300,7 +294,6 @@ async function upsertSignupWithProfile(
   specKey?: string,
   _updateMessage = false
 ) {
-  // store only role in signup; class/spec live in PlayerProfile
   await prisma.signup.upsert({
     where: { raidId_userId: { raidId, userId: i.user.id } },
     create: { raidId, userId: i.user.id, username: i.user.username, role },
@@ -339,6 +332,9 @@ export async function refreshSignupMessage(guild: Guild, raidId: string) {
     signups
   );
   embed.setColor(getDifficultyColor(raid.difficulty));
+  // hard clear any old image
+  // @ts-ignore
+  embed.setImage?.(null);
 
   const components = rowsForRaid(raidId);
 
