@@ -1,3 +1,4 @@
+// src/services/publishRaid.ts
 import {
   Guild,
   TextBasedChannel,
@@ -14,14 +15,12 @@ const CREATE_EVENTS = String(process.env.RAID_CREATE_EVENTS ?? 'true') === 'true
 const FUTURE_LEEWAY_SEC = Number(process.env.RAID_EVENT_LEEWAY_SEC ?? 300);
 const DEFAULT_DURATION_SEC = Number(process.env.RAID_EVENT_DEFAULT_DURATION_SEC ?? 3 * 3600);
 
-// Resolve channel based on difficulty
 function resolveChannelId(diff: string): string {
   const key = (diff || '').toUpperCase();
   const map = cfg.channelRouting as Record<string, string>;
   return map[key] || cfg.fallbackChannel;
 }
 
-// Map difficulty -> color
 function getDifficultyColor(diffRaw: string | undefined) {
   const diff = (diffRaw || '').toUpperCase();
   const COLORS: Record<string, number> = {
@@ -34,13 +33,14 @@ function getDifficultyColor(diffRaw: string | undefined) {
 }
 
 export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
+  // --- channel
   const chId = resolveChannelId(payload.difficulty);
   const fetched = await guild.channels.fetch(chId).catch(() => null);
   const isText = (fetched as any)?.isTextBased?.() === true;
   if (!fetched || !isText) throw new Error(`No access to text channel ${chId}`);
   const channel = fetched as TextBasedChannel;
 
-  // Timestamps
+  // --- timestamps
   const nowSec = Math.floor(Date.now() / 1000);
   let startSec = Number(payload.startAt || (nowSec + FUTURE_LEEWAY_SEC));
   let endSec = payload.endAt != null ? Number(payload.endAt) : (startSec + DEFAULT_DURATION_SEC);
@@ -49,7 +49,7 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
 
   const isPast = startSec < (nowSec + FUTURE_LEEWAY_SEC);
 
-  // DB upsert (UWAGA: NIE zapisujemy 'status'!)
+  // --- DB upsert (no 'status' writes at all)
   const raid = await prisma.raid.upsert({
     where: { raidId: payload.raidId },
     create: {
@@ -71,15 +71,13 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
     },
   });
 
-  // Status tylko do odczytu (może nie istnieć w tej bazie)
+  // --- allowSignups: prefer DB status if present, otherwise fallback to time
   const raidStatus = (raid as any)?.status as string | undefined;
-  // Jeśli status istnieje -> tylko CREATED pozwala na zapisy
-  // Jeśli nie istnieje -> fallback na czas (jak dawniej)
   const allowSignups = typeof raidStatus === 'string'
     ? raidStatus === 'CREATED'
     : (Math.floor(Date.now() / 1000) < startSec);
 
-  // Embed + components
+  // --- embed + components
   const signupsFlat = await loadSignups(payload.raidId, guild);
   const embed = buildSignupEmbed(
     {
@@ -89,26 +87,20 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
       startAt: startSec,
       endAt: endSec,
       notes: payload.notes,
-      status: raidStatus, // tylko do wyświetlenia, jeśli jest
+      status: raidStatus, // read-only display if column exists
     },
     payload.caps,
     signupsFlat,
   );
   embed.setColor(getDifficultyColor(payload.difficulty));
-
   const components = rowsForRaid(payload.raidId, { allowSignups });
 
-  // Message create/update
+  // --- message create/update
   let messageId: string | null = raid.messageId ?? null;
-
   if (messageId) {
     const msg = await (channel as any).messages?.fetch?.(messageId).catch(() => null);
     if (msg) {
-      await msg.edit({
-        embeds: [embed],
-        components,
-        attachments: [],
-      }).catch(() => {});
+      await msg.edit({ embeds: [embed], components, attachments: [] }).catch(() => {});
     } else {
       messageId = null;
     }
@@ -118,10 +110,9 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
     if (sent) messageId = sent.id;
   }
 
-  // Scheduled event: tylko gdy przyszłość
+  // --- scheduled event (only for future)
   let eventId: string | null = raid.scheduledEventId ?? null;
   const eventName = clampEventTitle(payload.raidTitle);
-
   if (CREATE_EVENTS && !isPast) {
     try {
       if (eventId) {
@@ -154,6 +145,7 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
     }
   }
 
+  // --- persist message/event IDs
   await prisma.raid.update({
     where: { raidId: payload.raidId },
     data: { messageId, scheduledEventId: eventId },
