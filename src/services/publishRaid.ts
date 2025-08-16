@@ -6,8 +6,6 @@ import {
   GuildScheduledEventPrivacyLevel,
   AttachmentBuilder,
 } from 'discord.js';
-import path from 'path';
-import fs from 'fs/promises';
 
 import { cfg } from '../config.js';
 import { clampEventTitle, RaidPayload } from './mapping.js';
@@ -26,8 +24,8 @@ function resolveChannelId(diff: string): string {
   return map[key] || cfg.fallbackChannel;
 }
 
-// Map difficulty -> color + local icon filename
-function getDifficultyMeta(diffRaw: string | undefined) {
+// Map difficulty -> color
+function getDifficultyColor(diffRaw: string | undefined) {
   const diff = (diffRaw || '').toUpperCase();
   const COLORS: Record<string, number> = {
     LFR: 0x1abc9c,
@@ -35,33 +33,7 @@ function getDifficultyMeta(diffRaw: string | undefined) {
     HEROIC: 0xe67e22,
     MYTHIC: 0xe74c3c,
   };
-  const ICONS: Record<string, string> = {
-    LFR: 'diff_lfr.png',
-    NORMAL: 'diff_normal.png',
-    HEROIC: 'diff_heroic.png',
-    MYTHIC: 'diff_mythic.png',
-  };
-  return {
-    color: COLORS[diff] ?? 0x5865f2,
-    iconFile: ICONS[diff] ?? null,
-  };
-}
-
-async function tryBuildDiffIconAttachment(diffRaw: string | undefined) {
-  const { iconFile } = getDifficultyMeta(diffRaw);
-  if (!iconFile) return null;
-
-  // Expecting files under app/assets/icons/
-  const abs = path.join(process.cwd(), 'app', 'assets', 'icons', iconFile);
-  try {
-    const buf = await fs.readFile(abs);
-    // Use a stable name so we can reference it via attachment://
-    const name = 'raid-diff.png';
-    return new AttachmentBuilder(buf, { name });
-  } catch {
-    // Icon missing in repo -> silently ignore
-    return null;
-  }
+  return COLORS[diff] ?? 0x5865f2;
 }
 
 export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
@@ -115,35 +87,28 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
     payload.caps,
     signupsFlat,
   );
+  embed.setColor(getDifficultyColor(payload.difficulty));
 
-  // Color & thumbnail from local difficulty icon
-  const { color } = getDifficultyMeta(payload.difficulty);
-  embed.setColor(color);
+  // roster tylko jeśli ktoś jest zapisany (Tank/Healer/Melee/Ranged)
+  const anySignup = signupsFlat.some(s =>
+    s.role === 'TANK' || s.role === 'HEALER' || s.role === 'MELEE' || s.role === 'RANGED'
+  );
 
-  // Collect files (roster image + optional diff icon)
   const files: AttachmentBuilder[] = [];
-
-  // Obrazek rosteru — wymaga SignupsGrouped
-  try {
-    const { attachment, filename } = await buildRosterImage({
-      title: payload.raidTitle,
-      startAt: startSec,
-      caps: payload.caps,
-      signups: toGroupedSignups(signupsFlat),
-      guildId: guild.id,
-    });
-    embed.setImage(`attachment://${filename}`);
-    files.push(attachment);
-  } catch {
-    // brak obrazka nie powinien blokować publikacji
-  }
-
-  // Local difficulty icon as thumbnail
-  const diffIcon = await tryBuildDiffIconAttachment(payload.difficulty);
-  if (diffIcon) {
-    // Must reference by the exact name we passed to AttachmentBuilder
-   // embed.setThumbnail('attachment://raid-diff.png');
-   // files.push(diffIcon);
+  if (anySignup) {
+    try {
+      const { attachment, filename } = await buildRosterImage({
+        title: payload.raidTitle,
+        startAt: startSec,
+        caps: payload.caps,
+        signups: toGroupedSignups(signupsFlat),
+        guildId: guild.id,
+      });
+      embed.setImage(`attachment://${filename}`);
+      files.push(attachment);
+    } catch {
+      // brak obrazka nie powinien blokować publikacji
+    }
   }
 
   const components = rowsForRaid(payload.raidId);
@@ -173,30 +138,26 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
       if (eventId) {
         const ev = await guild.scheduledEvents.fetch(eventId).catch(() => null);
         if (ev) {
-          await ev
-            .edit({
-              name: eventName,
-              scheduledStartTime: new Date(startSec * 1000),
-              scheduledEndTime: new Date(endSec * 1000),
-              description: payload.notes || '',
-            })
-            .catch(() => {});
+          await ev.edit({
+            name: eventName,
+            scheduledStartTime: new Date(startSec * 1000),
+            scheduledEndTime: new Date(endSec * 1000),
+            description: payload.notes || '',
+          }).catch(() => {});
         } else {
           eventId = null;
         }
       }
       if (!eventId) {
-        const ev = await guild.scheduledEvents
-          .create({
-            name: eventName,
-            scheduledStartTime: new Date(startSec * 1000),
-            scheduledEndTime: new Date(endSec * 1000),
-            privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly,
-            entityType: GuildScheduledEventEntityType.External,
-            entityMetadata: { location: 'In-game (WoW)' },
-            description: payload.notes || '',
-          })
-          .catch(() => null);
+        const ev = await guild.scheduledEvents.create({
+          name: eventName,
+          scheduledStartTime: new Date(startSec * 1000),
+          scheduledEndTime: new Date(endSec * 1000),
+          privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly,
+          entityType: GuildScheduledEventEntityType.External,
+          entityMetadata: { location: 'In-game (WoW)' },
+          description: payload.notes || '',
+        }).catch(() => null);
         if (ev) eventId = ev.id;
       }
     } catch {
