@@ -14,6 +14,7 @@ import {
 
 export type RoleKey = 'TANK'|'HEALER'|'MELEE'|'RANGED'|'MAYBE'|'ABSENT';
 
+// ---------- normalizacja + emoji helpery ----------
 function normToken(s?: string) {
   return (s ?? '').toLowerCase().trim().replace(/\s+|-/g, '_');
 }
@@ -53,9 +54,9 @@ function keyFor(cls?: string, spec?: string) {
 function toEmojiToken(name: string, value: string): string | null {
   const v = (value ?? '').trim();
   if (!v) return null;
-  if (/^<a?:[^:>]+:\d+>$/.test(v)) return v;          // pełny token
+  if (/^<a?:[^:>]+:\d+>$/.test(v)) return v;               // pełny token
   const m = /^a:(\d+)$/.exec(v); if (m) return `<a:${name}:${m[1]}>`; // anim
-  if (/^\d+$/.test(v)) return `<:${name}:${v}>`;       // statyczne ID
+  if (/^\d+$/.test(v)) return `<:${name}:${v}>`;            // statyczne ID
   return null;
 }
 /** Zamienia ':class_spec:' -> '<:class_spec:ID>' jeśli mamy ID w cfg.customEmoji */
@@ -69,8 +70,7 @@ function ensureEmojiToken(maybe: string, cls?: string, spec?: string): string {
   return maybe;
 }
 
-
-
+// ---------- stałe / kolor trudności ----------
 const DEFAULT_DURATION_SEC = Number(process.env.RAID_EVENT_DEFAULT_DURATION_SEC ?? 3 * 3600);
 
 function getDifficultyColor(diffRaw?: string) {
@@ -93,17 +93,13 @@ export function normalizeRole(role: string): RoleKey {
 }
 
 /**
- * Load signups and enrich with:
- * - class/spec from PlayerProfile
- * - display name: profile alias -> guild displayName -> stored username
- *
- * Pass Guild object (preferred) to also resolve displayName in bulk.
+ * Wczytuje zapisy + (opcjonalnie) profil i serwerowe wyświetlane nazwy.
+ * Dodatkowo zwraca createdAtSec do użycia jako „kiedy” przy graczu.
  */
-// --- replace the whole loadSignups with this version ---
 export async function loadSignups(
   raidId: string,
   guildOrId?: Guild | string
-): Promise<Array<{ userId: string; username: string; role: RoleKey; classKey?: string; specKey?: string }>> {
+): Promise<Array<{ userId: string; username: string; role: RoleKey; classKey?: string; specKey?: string; createdAtSec?: number }>> {
   const rows = await prisma.signup.findMany({
     where: { raidId },
     orderBy: { createdAt: 'asc' },
@@ -113,18 +109,18 @@ export async function loadSignups(
   const guildId  = typeof guildOrId === 'string' ? guildOrId : guildOrId?.id;
   const guildObj = typeof guildOrId === 'object' ? (guildOrId as Guild) : undefined;
 
-  // 1) Profiles (only fields that exist in schema)
+  // Profile (pola z aktualnego schematu)
   let pmap = new Map<string, { classKey?: string; specKey?: string }>();
   if (guildId) {
     const ids = Array.from(new Set(rows.map(r => r.userId)));
     const profiles = await prisma.playerProfile.findMany({
       where: { guildId, userId: { in: ids } },
-      select: { userId: true, classKey: true, specKey: true }, // <-- only existing fields
+      select: { userId: true, classKey: true, specKey: true },
     });
     pmap = new Map(profiles.map(p => [p.userId, { classKey: p.classKey ?? undefined, specKey: p.specKey ?? undefined }]));
   }
 
-  // 2) Guild display names (bulk; no .values() anywhere)
+  // Wyświetlane nazwy z gildii (bulk)
   const display = new Map<string, string>();
   if (guildObj) {
     const uniqueIds = Array.from(new Set(rows.map(r => r.userId)));
@@ -137,22 +133,22 @@ export async function loadSignups(
     }
   }
 
-  // 3) Compose output
+  // Compose output
   return rows.map(r => {
     const prof = pmap.get(r.userId);
-    const name = display.get(r.userId) || r.username; // server nickname fallback
+    const name = display.get(r.userId) || r.username; // serwerowy nick lub zapasowo z DB
     return {
       userId: r.userId,
       username: name,
       role: normalizeRole(r.role),
       classKey: prof?.classKey,
       specKey: prof?.specKey,
+      createdAtSec: Math.floor(r.createdAt.getTime() / 1000),
     };
   });
 }
 
-
-/** Group into role buckets for the roster image (if used elsewhere) */
+/** Group for potential roster image usage */
 export function toGroupedSignups(
   list: Array<{ userId: string; username: string; role: RoleKey; classKey?: string; specKey?: string; }>
 ): SignupsGrouped {
@@ -186,7 +182,9 @@ const ROLE_ICONS: Record<RoleKey,string> = {
   ABSENT: '🚫',
 };
 
-function fmtPlayers(arr: Array<{username: string; classKey?: string; specKey?: string; role: RoleKey}>): string {
+type PlayerLine = { username: string; classKey?: string; specKey?: string; role: RoleKey; createdAtSec?: number };
+
+function fmtPlayers(arr: PlayerLine[]): string {
   if (!arr.length) return '—';
   return arr.map(p => {
     let icon = '•';
@@ -194,29 +192,37 @@ function fmtPlayers(arr: Array<{username: string; classKey?: string; specKey?: s
       const raw = classSpecEmoji(p.classKey, p.specKey, p.role);
       icon = ensureEmojiToken(raw, p.classKey, p.specKey);
     }
-    return `${icon} ${p.username}`;
+    const when = p.createdAtSec ? ` — <t:${p.createdAtSec}:R>` : '';
+    return `${icon} ${p.username}${when}`;
   }).join('\n');
 }
-
-
 
 export function buildSignupEmbed(
   meta: { raidId: string; raidTitle: string; difficulty: string; startAt: number; endAt: number; notes?: string },
   caps: { tank?: number; healer?: number; melee?: number; ranged?: number } | undefined,
-  signups: Array<{ userId: string; username: string; role: RoleKey; classKey?: string; specKey?: string }>
+  signups: Array<{ userId: string; username: string; role: RoleKey; classKey?: string; specKey?: string; createdAtSec?: number }>
 ) {
   const groups: Record<RoleKey, typeof signups> = {
     TANK: [], HEALER: [], MELEE: [], RANGED: [], MAYBE: [], ABSENT: [],
   };
   for (const s of signups) groups[s.role]?.push(s);
 
+  // licznik: committed + maybes
+  const committed = groups.TANK.length + groups.HEALER.length + groups.MELEE.length + groups.RANGED.length;
+  const maybes = groups.MAYBE.length;
+
+  const descParts: string[] = [];
+  if (meta.notes) descParts.push(meta.notes);
+  descParts.push(`👥 **${committed}+${maybes}**`);
+
   const embed = new EmbedBuilder()
-    .setTitle(meta.raidTitle)
-    .setDescription(meta.notes || '')
+    .setTitle(meta.raidTitle.toUpperCase())
+    .setDescription(descParts.join('\n'))
     .addFields(
       { name: 'Difficulty', value: meta.difficulty || '—', inline: true },
-      { name: 'Start', value: `<t:${meta.startAt}:F> (<t:${meta.startAt}:R>)`, inline: true },
+      { name: 'Start', value: `<t:${meta.startAt}:F>\n(<t:${meta.startAt}:R>)`, inline: true },
       { name: 'End',   value: `<t:${meta.endAt}:t>`, inline: true },
+      { name: '\u200B', value: '\u200B' }, // odstęp
     )
     .addFields(
       { name: `${ROLE_ICONS.TANK} Tank (${groups.TANK.length}${caps?.tank ? `/${caps.tank}` : ''})`, value: fmtPlayers(groups.TANK.map(u => ({...u, role: 'TANK'}))), inline: true },
@@ -234,7 +240,7 @@ export function buildSignupEmbed(
   return embed;
 }
 
-// ---------- BUTTONS / ROWS ----------
+// ---------- BUTTONS / ROWY ----------
 
 export function roleButtonsRow(raidId: string): ActionRowBuilder<ButtonBuilder> {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -247,8 +253,8 @@ export function roleButtonsRow(raidId: string): ActionRowBuilder<ButtonBuilder> 
 }
 
 export function changeRoleRow(raidId: string): ActionRowBuilder<ButtonBuilder> {
+  // Usuwamy „Change role” — dublował wybór ról powyżej
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId(`signup:changeRole:${raidId}`).setLabel('Change role').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`profile:change:${raidId}`).setLabel('Change class/spec').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`signup:role:${raidId}:ABSENT`).setLabel('Leave').setStyle(ButtonStyle.Danger),
   );
@@ -258,7 +264,7 @@ export function rowsForRaid(raidId: string) {
   return [roleButtonsRow(raidId), changeRoleRow(raidId)];
 }
 
-// ---------- INTERACTIONS ----------
+// ---------- INTERAKCJE ----------
 
 export async function handleSignupButton(i: ButtonInteraction, guild: Guild) {
   if (!i.customId.startsWith('signup:') && !i.customId.startsWith('profile:change:')) return false;
@@ -279,13 +285,8 @@ export async function handleSignupButton(i: ButtonInteraction, guild: Guild) {
     return true;
   }
 
-  const parts = i.customId.split(':'); // signup:role:RAIDID:ROLE  /  signup:changeRole:RAIDID
+  const parts = i.customId.split(':'); // signup:role:RAIDID:ROLE
   const kind = parts[1];
-
-  if (kind === 'changeRole') {
-    await i.reply({ content: 'Pick your new role:', components: [roleButtonsRow(parts[2])], ephemeral: true });
-    return true;
-  }
 
   if (kind === 'role') {
     const raidId = parts[2];
@@ -400,7 +401,7 @@ export async function refreshSignupMessage(guild: Guild, raidId: string) {
   const endDate  = raid.endAt ?? new Date(raid.startAt.getTime() + DEFAULT_DURATION_SEC * 1000);
   const endSec   = Math.floor(endDate.getTime() / 1000);
 
-  // IMPORTANT: pass Guild object to get guild display names
+  // przekaż Guild — dostaniemy displayName'y
   const signups = await loadSignups(raidId, guild);
 
   const embed = buildSignupEmbed(
@@ -416,7 +417,7 @@ export async function refreshSignupMessage(guild: Guild, raidId: string) {
     signups
   );
   embed.setColor(getDifficultyColor(raid.difficulty));
-  // hard clear any old image so the "purple box" never comes back
+  // twarde czyszczenie obrazka – zero „fioletowego boxa”
   // @ts-ignore
   embed.setImage?.(null);
 
