@@ -70,7 +70,7 @@ function ensureEmojiToken(maybe: string, cls?: string, spec?: string): string {
   return maybe;
 }
 
-// ---------- stałe / kolor trudności ----------
+// ---------- stałe / kolor trudności / status ----------
 const DEFAULT_DURATION_SEC = Number(process.env.RAID_EVENT_DEFAULT_DURATION_SEC ?? 3 * 3600);
 
 function getDifficultyColor(diffRaw?: string) {
@@ -84,6 +84,11 @@ function getDifficultyColor(diffRaw?: string) {
   return COLORS[diff] ?? 0x5865f2;
 }
 
+function isSignupsOpen(startSec: number, endSec: number) {
+  const now = Math.floor(Date.now() / 1000);
+  return now < startSec; // tylko "created"
+}
+
 export function normalizeRole(role: string): RoleKey {
   const u = (role ?? '').toUpperCase();
   if (u === 'TANK' || u === 'HEALER' || u === 'MELEE' || u === 'RANGED' || u === 'MAYBE' || u === 'ABSENT') {
@@ -94,7 +99,7 @@ export function normalizeRole(role: string): RoleKey {
 
 /**
  * Wczytuje zapisy + (opcjonalnie) profil i serwerowe wyświetlane nazwy.
- * Dodatkowo zwraca createdAtSec do użycia jako „kiedy” przy graczu.
+ * Dodatkowo zwraca createdAtSec do liczenia kolejności.
  */
 export async function loadSignups(
   raidId: string,
@@ -182,21 +187,6 @@ const ROLE_ICONS: Record<RoleKey,string> = {
   ABSENT: '🚫',
 };
 
-type PlayerLine = { username: string; classKey?: string; specKey?: string; role: RoleKey; createdAtSec?: number };
-
-function fmtPlayers(arr: PlayerLine[]): string {
-  if (!arr.length) return '—';
-  return arr.map(p => {
-    let icon = '•';
-    if (p.classKey && p.specKey) {
-      const raw = classSpecEmoji(p.classKey, p.specKey, p.role);
-      icon = ensureEmojiToken(raw, p.classKey, p.specKey);
-    }
-    const when = p.createdAtSec ? ` — <t:${p.createdAtSec}:R>` : '';
-    return `${icon} ${p.username}${when}`;
-  }).join('\n');
-}
-
 export function buildSignupEmbed(
   meta: { raidId: string; raidTitle: string; difficulty: string; startAt: number; endAt: number; notes?: string },
   caps: { tank?: number; healer?: number; melee?: number; ranged?: number } | undefined,
@@ -225,13 +215,9 @@ export function buildSignupEmbed(
   const orderMap = new Map<string, number>(ordered);
 
   const HEADER_LINE = '────────────';
-
-  const fmtPlayers = (arr: typeof signups, role: RoleKey) => {
-    const out: string[] = [HEADER_LINE];           // ZAWSZE podkreślenie jako 1. linia
-    if (!arr.length) {
-      out.push('—');
-      return out.join('\n');
-    }
+  const block = (arr: typeof signups, role: RoleKey) => {
+    const out: string[] = [HEADER_LINE];
+    if (!arr.length) { out.push('—'); return out.join('\n'); }
     for (const p of arr) {
       let icon = '•';
       if (p.classKey && p.specKey) {
@@ -252,27 +238,25 @@ export function buildSignupEmbed(
     )
     .addFields(
       { name: 'Difficulty', value: meta.difficulty || '—', inline: true },
-      { name: 'Start', value: `<t:${meta.startAt}:f>\n(<t:${meta.startAt}:R>)`, inline: true }, // bez dnia tygodnia; "ago" w 2. linii
+      { name: 'Start', value: `<t:${meta.startAt}:f>\n(<t:${meta.startAt}:R>)`, inline: true }, // bez dnia tygodnia; „ago” pod spodem
       { name: 'End',   value: `<t:${meta.endAt}:t>`, inline: true },
-      { name: '\u200B', value: '\u200B' }, // mały odstęp między metadanymi a kolumnami ról
+      { name: '\u200B', value: '\u200B' },
     )
     .addFields(
-      { name: `🛡️ Tank (${groups.TANK.length}${caps?.tank ? `/${caps.tank}` : ''})`, value: fmtPlayers(groups.TANK, 'TANK'), inline: true },
-      { name: `✨ Healer (${groups.HEALER.length}${caps?.healer ? `/${caps.healer}` : ''})`, value: fmtPlayers(groups.HEALER, 'HEALER'), inline: true },
-      { name: `⚔️ Melee (${groups.MELEE.length}${caps?.melee ? `/${caps.melee}` : ''})`, value: fmtPlayers(groups.MELEE, 'MELEE'), inline: true },
+      { name: `${ROLE_ICONS.TANK} Tank (${groups.TANK.length}${caps?.tank ? `/${caps.tank}` : ''})`, value: block(groups.TANK, 'TANK'), inline: true },
+      { name: `${ROLE_ICONS.HEALER} Healer (${groups.HEALER.length}${caps?.healer ? `/${caps.healer}` : ''})`, value: block(groups.HEALER, 'HEALER'), inline: true },
+      { name: `${ROLE_ICONS.MELEE} Melee (${groups.MELEE.length}${caps?.melee ? `/${caps.melee}` : ''})`, value: block(groups.MELEE, 'MELEE'), inline: true },
     )
-    // SPACER między pierwszym wierszem ról a drugim (Tank/Healer/Melee vs Ranged/Maybe/Absent)
-    // mniejszy odstęp – jeden „wiersz” z trzema pustymi polami inline
-.addFields(
-  { name: '\u200B', value: '\u200B', inline: true },
-  { name: '\u200B', value: '\u200B', inline: true },
-  { name: '\u200B', value: '\u200B', inline: true },
-)
-
+    // mniejszy spacer między wierszami ról
     .addFields(
-      { name: `🏹 Ranged (${groups.RANGED.length}${caps?.ranged ? `/${caps.ranged}` : ''})`, value: fmtPlayers(groups.RANGED, 'RANGED'), inline: true },
-      { name: `❔ Maybe (${groups.MAYBE.length})`, value: fmtPlayers(groups.MAYBE, 'MAYBE'), inline: true },
-      { name: `🚫 Absent (${groups.ABSENT.length})`, value: fmtPlayers(groups.ABSENT, 'ABSENT'), inline: true },
+      { name: '\u200B', value: '\u200B', inline: true },
+      { name: '\u200B', value: '\u200B', inline: true },
+      { name: '\u200B', value: '\u200B', inline: true },
+    )
+    .addFields(
+      { name: `${ROLE_ICONS.RANGED} Ranged (${groups.RANGED.length}${caps?.ranged ? `/${caps.ranged}` : ''})`, value: block(groups.RANGED, 'RANGED'), inline: true },
+      { name: `${ROLE_ICONS.MAYBE} Maybe (${groups.MAYBE.length})`, value: block(groups.MAYBE, 'MAYBE'), inline: true },
+      { name: `${ROLE_ICONS.ABSENT} Absent (${groups.ABSENT.length})`, value: block(groups.ABSENT, 'ABSENT'), inline: true },
     )
     .setFooter({ text: `RaidID: ${meta.raidId}` })
     .setColor(getDifficultyColor(meta.difficulty));
@@ -280,30 +264,29 @@ export function buildSignupEmbed(
   return embed;
 }
 
-
-
 // ---------- BUTTONS / ROWY ----------
 
-export function roleButtonsRow(raidId: string): ActionRowBuilder<ButtonBuilder> {
+export function roleButtonsRow(raidId: string, disabled = false): ActionRowBuilder<ButtonBuilder> {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId(`signup:role:${raidId}:TANK`).setLabel('Tank').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(`signup:role:${raidId}:HEALER`).setLabel('Healer').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`signup:role:${raidId}:MELEE`).setLabel('Melee').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`signup:role:${raidId}:RANGED`).setLabel('Ranged').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`signup:role:${raidId}:MAYBE`).setLabel('Maybe').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`signup:role:${raidId}:TANK`).setLabel('Tank').setStyle(ButtonStyle.Primary).setDisabled(disabled),
+    new ButtonBuilder().setCustomId(`signup:role:${raidId}:HEALER`).setLabel('Healer').setStyle(ButtonStyle.Success).setDisabled(disabled),
+    new ButtonBuilder().setCustomId(`signup:role:${raidId}:MELEE`).setLabel('Melee').setStyle(ButtonStyle.Secondary).setDisabled(disabled),
+    new ButtonBuilder().setCustomId(`signup:role:${raidId}:RANGED`).setLabel('Ranged').setStyle(ButtonStyle.Secondary).setDisabled(disabled),
+    new ButtonBuilder().setCustomId(`signup:role:${raidId}:MAYBE`).setLabel('Maybe').setStyle(ButtonStyle.Secondary).setDisabled(disabled),
   );
 }
 
-export function changeRoleRow(raidId: string): ActionRowBuilder<ButtonBuilder> {
-  // Usuwamy „Change role” — dublował wybór ról powyżej
+export function changeRoleRow(raidId: string, disableSignups = false): ActionRowBuilder<ButtonBuilder> {
+  // „Change role” usunięty; Leave również blokujemy po starcie
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId(`profile:change:${raidId}`).setLabel('Change class/spec').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`signup:role:${raidId}:ABSENT`).setLabel('Leave').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(`signup:role:${raidId}:ABSENT`).setLabel('Leave').setStyle(ButtonStyle.Danger).setDisabled(disableSignups),
   );
 }
 
-export function rowsForRaid(raidId: string) {
-  return [roleButtonsRow(raidId), changeRoleRow(raidId)];
+export function rowsForRaid(raidId: string, opts?: { allowSignups?: boolean }) {
+  const disabled = opts?.allowSignups === false;
+  return [roleButtonsRow(raidId, disabled), changeRoleRow(raidId, disabled)];
 }
 
 // ---------- INTERAKCJE ----------
@@ -327,7 +310,8 @@ export async function handleSignupButton(i: ButtonInteraction, guild: Guild) {
     return true;
   }
 
-  const parts = i.customId.split(':'); // signup:role:RAIDID:ROLE
+  // signup:role:RAIDID:ROLE
+  const parts = i.customId.split(':');
   const kind = parts[1];
 
   if (kind === 'role') {
@@ -335,6 +319,16 @@ export async function handleSignupButton(i: ButtonInteraction, guild: Guild) {
     const role = (parts[3] as RoleKey) || 'MAYBE';
     if (!raidId) {
       await i.reply({ content: 'Cannot resolve raid context.', ephemeral: true });
+      return true;
+    }
+
+    // twarda blokada po starcie/końcu
+    const raid = await prisma.raid.findUnique({ where: { raidId } });
+    if (!raid) { await i.reply({ content: 'Raid not found.', ephemeral: true }); return true; }
+    const startSec = Math.floor(raid.startAt.getTime() / 1000);
+    const endSec   = Math.floor((raid.endAt ?? new Date(raid.startAt.getTime() + DEFAULT_DURATION_SEC * 1000)).getTime() / 1000);
+    if (!isSignupsOpen(startSec, endSec)) {
+      await i.reply({ content: 'Signups are closed for this raid.', ephemeral: true });
       return true;
     }
 
@@ -463,7 +457,7 @@ export async function refreshSignupMessage(guild: Guild, raidId: string) {
   // @ts-ignore
   embed.setImage?.(null);
 
-  const components = rowsForRaid(raidId);
+  const components = rowsForRaid(raidId, { allowSignups: isSignupsOpen(startSec, endSec) });
 
   const msg = await (ch as any).messages?.fetch?.(raid.messageId).catch(() => null);
   if (msg) {

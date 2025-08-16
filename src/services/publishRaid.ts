@@ -86,7 +86,8 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
   );
   embed.setColor(getDifficultyColor(payload.difficulty));
 
-  const components = rowsForRaid(payload.raidId);
+  const allowSignups = Math.floor(Date.now() / 1000) < startSec;
+const components = rowsForRaid(payload.raidId, { allowSignups });
 
   // Message create/update (no images/attachments)
   let messageId: string | null = raid.messageId ?? null;
