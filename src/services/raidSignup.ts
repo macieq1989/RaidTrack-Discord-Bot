@@ -6,12 +6,70 @@ import {
 import { prisma } from '../util/prisma.js';
 import { classSpecEmoji } from './profileIcons.js';
 import type { PlayerEntry, SignupsGrouped } from './rosterImage.js';
+import { cfg } from '../config.js';
 
 import {
   getPlayerProfile, upsertPlayerProfile, listClasses, listSpecs, isValidClassSpec,
 } from './playerProfile.js';
 
 export type RoleKey = 'TANK'|'HEALER'|'MELEE'|'RANGED'|'MAYBE'|'ABSENT';
+
+function normToken(s?: string) {
+  return (s ?? '').toLowerCase().trim().replace(/\s+|-/g, '_');
+}
+function normClass(s?: string) {
+  const t = normToken(s);
+  if (t === 'deathknight') return 'death_knight';
+  if (t === 'demonhunter') return 'demon_hunter';
+  return t;
+}
+const SPEC_ALIASES: Record<string, string> = {
+  retri: 'retribution',
+  retributions: 'retribution',
+  prot: 'protection',
+  disc: 'discipline',
+  bm: 'beast_mastery',
+  mm: 'marksmanship',
+  marks: 'marksmanship',
+  surv: 'survival',
+  enh: 'enhancement',
+  ele: 'elemental',
+  resto: 'restoration',
+  destro: 'destruction',
+  affli: 'affliction',
+  demo: 'demonology',
+  arc: 'arcane',
+};
+function normSpec(s?: string) {
+  let t = normToken(s);
+  if (SPEC_ALIASES[t]) t = SPEC_ALIASES[t];
+  return t;
+}
+function keyFor(cls?: string, spec?: string) {
+  const c = normClass(cls);
+  const s = normSpec(spec);
+  return c && s ? `${c}_${s}` : null;
+}
+function toEmojiToken(name: string, value: string): string | null {
+  const v = (value ?? '').trim();
+  if (!v) return null;
+  if (/^<a?:[^:>]+:\d+>$/.test(v)) return v;        // already full token
+  const m = /^a:(\d+)$/.exec(v);                    // "a:ID" -> animated
+  if (m) return `<a:${name}:${m[1]}>`;
+  if (/^\d+$/.test(v)) return `<:${name}:${v}>`;     // plain ID -> static
+  return null;
+}
+/** If someone zwrócił ':name:' – naprawiamy do '<:name:ID>' używając mapy z .env */
+function ensureEmojiToken(maybe: string, cls?: string, spec?: string): string {
+  if (/^:[^:]+:$/.test((maybe ?? '').trim())) {
+    const k = keyFor(cls, spec);
+    const raw = k ? cfg.customEmoji?.[k] : undefined;
+    const tok = raw ? toEmojiToken(k!, raw) : null;
+    if (tok) return tok;
+  }
+  return maybe;
+}
+
 
 const DEFAULT_DURATION_SEC = Number(process.env.RAID_EVENT_DEFAULT_DURATION_SEC ?? 3 * 3600);
 
@@ -131,10 +189,15 @@ const ROLE_ICONS: Record<RoleKey,string> = {
 function fmtPlayers(arr: Array<{username: string; classKey?: string; specKey?: string; role: RoleKey}>): string {
   if (!arr.length) return '—';
   return arr.map(p => {
-    const icon = (p.classKey && p.specKey) ? classSpecEmoji(p.classKey, p.specKey, p.role) : '•';
+    let icon = '•';
+    if (p.classKey && p.specKey) {
+      const raw = classSpecEmoji(p.classKey, p.specKey, p.role);
+      icon = ensureEmojiToken(raw, p.classKey, p.specKey);
+    }
     return `${icon} ${p.username}`;
   }).join('\n');
 }
+
 
 export function buildSignupEmbed(
   meta: { raidId: string; raidTitle: string; difficulty: string; startAt: number; endAt: number; notes?: string },
