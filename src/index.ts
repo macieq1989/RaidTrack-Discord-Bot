@@ -13,6 +13,11 @@ import webRoutes from './routes/web.js'; // keep .js extension with NodeNext/ESM
 import { startSavedVariablesPoller } from './services/svPoller.js';
 import { handleSignupButton, handleProfileSelect } from './services/raidSignup.js';
 
+
+console.log('[RT] allowExternalEmoji =', cfg.allowExternalEmoji);
+console.log('[RT] emoji map keys     =', Object.keys(cfg.customEmoji));
+console.log('[RT] paladin_protection =', cfg.customEmoji['paladin_protection']);
+
 // Intents: Guilds (required), GuildMembers (names for embeds), GuildMessages (fetch/edit msg)
 const client = new Client({
   intents: [

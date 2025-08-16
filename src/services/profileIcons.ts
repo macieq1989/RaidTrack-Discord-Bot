@@ -91,9 +91,13 @@ function toEmojiToken(name: string, value: string): string | null {
 export function classSpecEmoji(classKey?: string, specKey?: string, role?: RoleKey): string {
   const key = keyFor(classKey, specKey);
   if (key && cfg.allowExternalEmoji) {
-    const raw = cfg.customEmoji?.[key]; // from EMOJI_MAP_JSON / EMOJI_MAP
+    const raw = cfg.customEmoji?.[key];
     const token = raw ? toEmojiToken(key, raw) : null;
-    if (token) return token;            // "<:name:id>" / "<a:name:id>"
+
+    console.log('[emoji]', { classKey, specKey, key, raw, token, allow: cfg.allowExternalEmoji });
+
+    if (token) return token;
   }
   return role ? (ROLE_FALLBACK[role] ?? '•') : '•';
 }
+
