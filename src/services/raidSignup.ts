@@ -1,3 +1,4 @@
+// src/services/raidSignup.ts
 import {
   ActionRowBuilder, ButtonBuilder, ButtonInteraction, ButtonStyle,
   StringSelectMenuBuilder, StringSelectMenuInteraction, EmbedBuilder, Guild,
@@ -33,51 +34,67 @@ export function normalizeRole(role: string): RoleKey {
   return 'MAYBE';
 }
 
-/** Load signups and enrich with class/spec + alias from PlayerProfile (by guildId). */
+/**
+ * Load signups and enrich with:
+ * - class/spec from PlayerProfile
+ * - display name: profile alias -> guild displayName -> stored username
+ *
+ * Pass Guild object (preferred) to also resolve displayName in bulk.
+ */
+// --- replace the whole loadSignups with this version ---
 export async function loadSignups(
   raidId: string,
-  guildId?: string
+  guildOrId?: Guild | string
 ): Promise<Array<{ userId: string; username: string; role: RoleKey; classKey?: string; specKey?: string }>> {
   const rows = await prisma.signup.findMany({
     where: { raidId },
     orderBy: { createdAt: 'asc' },
   });
+  if (rows.length === 0) return [];
 
-  if (!guildId || rows.length === 0) {
-    return rows.map(r => ({
-      userId: r.userId,
-      username: r.username,
-      role: normalizeRole(r.role),
-    }));
+  const guildId  = typeof guildOrId === 'string' ? guildOrId : guildOrId?.id;
+  const guildObj = typeof guildOrId === 'object' ? (guildOrId as Guild) : undefined;
+
+  // 1) Profiles (only fields that exist in schema)
+  let pmap = new Map<string, { classKey?: string; specKey?: string }>();
+  if (guildId) {
+    const ids = Array.from(new Set(rows.map(r => r.userId)));
+    const profiles = await prisma.playerProfile.findMany({
+      where: { guildId, userId: { in: ids } },
+      select: { userId: true, classKey: true, specKey: true }, // <-- only existing fields
+    });
+    pmap = new Map(profiles.map(p => [p.userId, { classKey: p.classKey ?? undefined, specKey: p.specKey ?? undefined }]));
   }
 
-  const userIds = Array.from(new Set(rows.map(r => r.userId)));
-  const profiles = await prisma.playerProfile.findMany({
-    where: { guildId, userId: { in: userIds } },
-  });
+  // 2) Guild display names (bulk; no .values() anywhere)
+  const display = new Map<string, string>();
+  if (guildObj) {
+    const uniqueIds = Array.from(new Set(rows.map(r => r.userId)));
+    const results = await Promise.allSettled(uniqueIds.map(id => guildObj.members.fetch(id)));
+    for (const res of results) {
+      if (res.status === 'fulfilled') {
+        const m = res.value;
+        if (m?.id && m.displayName) display.set(m.id, m.displayName);
+      }
+    }
+  }
 
-  const pmap = new Map<string, any>(profiles.map((p: any) => [p.userId, p]));
-
+  // 3) Compose output
   return rows.map(r => {
-    const p: any = pmap.get(r.userId);
-    const alias =
-      p?.serverAlias ??
-      p?.characterName ??
-      p?.ingameName ??
-      p?.wowAlias ??
-      p?.displayName ??
-      r.username;
-
+    const prof = pmap.get(r.userId);
+    const name = display.get(r.userId) || r.username; // server nickname fallback
     return {
       userId: r.userId,
-      username: alias,                    // alias instead of Discord username
+      username: name,
       role: normalizeRole(r.role),
-      classKey: p?.classKey || undefined,
-      specKey: p?.specKey || undefined,
+      classKey: prof?.classKey,
+      specKey: prof?.specKey,
     };
   });
 }
 
+
+/** Group into role buckets for the roster image (if used elsewhere) */
 export function toGroupedSignups(
   list: Array<{ userId: string; username: string; role: RoleKey; classKey?: string; specKey?: string; }>
 ): SignupsGrouped {
@@ -94,6 +111,7 @@ export function toGroupedSignups(
       case 'HEALER': grouped.healer.push(entry); break;
       case 'MELEE':  grouped.melee.push(entry);  break;
       case 'RANGED': grouped.ranged.push(entry); break;
+      default: break;
     }
   }
   return grouped;
@@ -318,7 +336,9 @@ export async function refreshSignupMessage(guild: Guild, raidId: string) {
   const endDate  = raid.endAt ?? new Date(raid.startAt.getTime() + DEFAULT_DURATION_SEC * 1000);
   const endSec   = Math.floor(endDate.getTime() / 1000);
 
-  const signups = await loadSignups(raidId, guild.id);
+  // IMPORTANT: pass Guild object to get guild display names
+  const signups = await loadSignups(raidId, guild);
+
   const embed = buildSignupEmbed(
     {
       raidId,
@@ -332,7 +352,7 @@ export async function refreshSignupMessage(guild: Guild, raidId: string) {
     signups
   );
   embed.setColor(getDifficultyColor(raid.difficulty));
-  // hard clear any old image
+  // hard clear any old image so the "purple box" never comes back
   // @ts-ignore
   embed.setImage?.(null);
 

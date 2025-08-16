@@ -71,7 +71,7 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
   });
 
   // Embed + components
-  const signupsFlat = await loadSignups(payload.raidId, guild.id);
+  const signupsFlat = await loadSignups(payload.raidId, guild);
   const embed = buildSignupEmbed(
     {
       raidId: payload.raidId,
