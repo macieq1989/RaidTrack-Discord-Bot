@@ -1,4 +1,3 @@
-// src/services/raidSignup.ts
 import {
   ActionRowBuilder, ButtonBuilder, ButtonInteraction, ButtonStyle,
   StringSelectMenuBuilder, StringSelectMenuInteraction, EmbedBuilder, Guild,
@@ -14,6 +13,7 @@ import {
 
 export type RoleKey = 'TANK'|'HEALER'|'MELEE'|'RANGED'|'MAYBE'|'ABSENT';
 
+// ---------- normalizacja + emoji helpery ----------
 function normToken(s?: string) {
   return (s ?? '').toLowerCase().trim().replace(/\s+|-/g, '_');
 }
@@ -24,21 +24,12 @@ function normClass(s?: string) {
   return t;
 }
 const SPEC_ALIASES: Record<string, string> = {
-  retri: 'retribution',
-  retributions: 'retribution',
-  prot: 'protection',
-  disc: 'discipline',
-  bm: 'beast_mastery',
-  mm: 'marksmanship',
-  marks: 'marksmanship',
-  surv: 'survival',
-  enh: 'enhancement',
-  ele: 'elemental',
-  resto: 'restoration',
-  destro: 'destruction',
-  affli: 'affliction',
-  demo: 'demonology',
-  arc: 'arcane',
+  retri: 'retribution', retributions: 'retribution',
+  prot: 'protection',   disc: 'discipline',
+  bm: 'beast_mastery',  mm: 'marksmanship', marks: 'marksmanship',
+  surv: 'survival',     enh: 'enhancement', ele: 'elemental',
+  resto: 'restoration', destro: 'destruction', affli: 'affliction',
+  demo: 'demonology',   arc: 'arcane',
 };
 function normSpec(s?: string) {
   let t = normToken(s);
@@ -53,24 +44,22 @@ function keyFor(cls?: string, spec?: string) {
 function toEmojiToken(name: string, value: string): string | null {
   const v = (value ?? '').trim();
   if (!v) return null;
-  if (/^<a?:[^:>]+:\d+>$/.test(v)) return v;          // pełny token
-  const m = /^a:(\d+)$/.exec(v); if (m) return `<a:${name}:${m[1]}>`; // anim
-  if (/^\d+$/.test(v)) return `<:${name}:${v}>`;       // statyczne ID
+  if (/^<a?:[^:>]+:\d+>$/.test(v)) return v;
+  const m = /^a:(\d+)$/.exec(v); if (m) return `<a:${name}:${m[1]}>`;
+  if (/^\d+$/.test(v)) return `<:${name}:${v}>`;
   return null;
 }
-/** Zamienia ':class_spec:' -> '<:class_spec:ID>' jeśli mamy ID w cfg.customEmoji */
 function ensureEmojiToken(maybe: string, cls?: string, spec?: string): string {
   if (/^:[^:]+:$/.test((maybe ?? '').trim())) {
     const k = keyFor(cls, spec);
-    const raw = k ? cfg.customEmoji?.[k] : undefined;
+    const raw = k ? (cfg.customEmoji as any)?.[k] : undefined;
     const tok = raw ? toEmojiToken(k!, raw) : null;
     if (tok) return tok;
   }
   return maybe;
 }
 
-
-
+// ---------- stałe / kolor ----------
 const DEFAULT_DURATION_SEC = Number(process.env.RAID_EVENT_DEFAULT_DURATION_SEC ?? 3 * 3600);
 
 function getDifficultyColor(diffRaw?: string) {
@@ -83,6 +72,9 @@ function getDifficultyColor(diffRaw?: string) {
   };
   return COLORS[diff] ?? 0x5865f2;
 }
+function signupsOpenByTime(startSec: number) {
+  return Math.floor(Date.now() / 1000) < startSec;
+}
 
 export function normalizeRole(role: string): RoleKey {
   const u = (role ?? '').toUpperCase();
@@ -92,18 +84,11 @@ export function normalizeRole(role: string): RoleKey {
   return 'MAYBE';
 }
 
-/**
- * Load signups and enrich with:
- * - class/spec from PlayerProfile
- * - display name: profile alias -> guild displayName -> stored username
- *
- * Pass Guild object (preferred) to also resolve displayName in bulk.
- */
-// --- replace the whole loadSignups with this version ---
+/** Wczytuje zapisy + profil + serwerowe displayName; zwraca też createdAtSec */
 export async function loadSignups(
   raidId: string,
   guildOrId?: Guild | string
-): Promise<Array<{ userId: string; username: string; role: RoleKey; classKey?: string; specKey?: string }>> {
+): Promise<Array<{ userId: string; username: string; role: RoleKey; classKey?: string; specKey?: string; createdAtSec?: number }>> {
   const rows = await prisma.signup.findMany({
     where: { raidId },
     orderBy: { createdAt: 'asc' },
@@ -113,18 +98,18 @@ export async function loadSignups(
   const guildId  = typeof guildOrId === 'string' ? guildOrId : guildOrId?.id;
   const guildObj = typeof guildOrId === 'object' ? (guildOrId as Guild) : undefined;
 
-  // 1) Profiles (only fields that exist in schema)
+  // Profile
   let pmap = new Map<string, { classKey?: string; specKey?: string }>();
   if (guildId) {
     const ids = Array.from(new Set(rows.map(r => r.userId)));
     const profiles = await prisma.playerProfile.findMany({
       where: { guildId, userId: { in: ids } },
-      select: { userId: true, classKey: true, specKey: true }, // <-- only existing fields
+      select: { userId: true, classKey: true, specKey: true },
     });
     pmap = new Map(profiles.map(p => [p.userId, { classKey: p.classKey ?? undefined, specKey: p.specKey ?? undefined }]));
   }
 
-  // 2) Guild display names (bulk; no .values() anywhere)
+  // Display names
   const display = new Map<string, string>();
   if (guildObj) {
     const uniqueIds = Array.from(new Set(rows.map(r => r.userId)));
@@ -137,22 +122,20 @@ export async function loadSignups(
     }
   }
 
-  // 3) Compose output
   return rows.map(r => {
     const prof = pmap.get(r.userId);
-    const name = display.get(r.userId) || r.username; // server nickname fallback
+    const name = display.get(r.userId) || r.username;
     return {
       userId: r.userId,
       username: name,
       role: normalizeRole(r.role),
       classKey: prof?.classKey,
       specKey: prof?.specKey,
+      createdAtSec: Math.floor(r.createdAt.getTime() / 1000),
     };
   });
 }
 
-
-/** Group into role buckets for the roster image (if used elsewhere) */
 export function toGroupedSignups(
   list: Array<{ userId: string; username: string; role: RoleKey; classKey?: string; specKey?: string; }>
 ): SignupsGrouped {
@@ -176,57 +159,75 @@ export function toGroupedSignups(
 }
 
 // ---------- EMBED ----------
-
 const ROLE_ICONS: Record<RoleKey,string> = {
-  TANK:   '🛡️',
-  HEALER: '✨',
-  MELEE:  '⚔️',
-  RANGED: '🏹',
-  MAYBE:  '❔',
-  ABSENT: '🚫',
+  TANK: '🛡️', HEALER: '✨', MELEE: '⚔️', RANGED: '🏹', MAYBE: '❔', ABSENT: '🚫',
 };
 
-function fmtPlayers(arr: Array<{username: string; classKey?: string; specKey?: string; role: RoleKey}>): string {
-  if (!arr.length) return '—';
-  return arr.map(p => {
-    let icon = '•';
-    if (p.classKey && p.specKey) {
-      const raw = classSpecEmoji(p.classKey, p.specKey, p.role);
-      icon = ensureEmojiToken(raw, p.classKey, p.specKey);
-    }
-    return `${icon} ${p.username}`;
-  }).join('\n');
-}
-
-
-
 export function buildSignupEmbed(
-  meta: { raidId: string; raidTitle: string; difficulty: string; startAt: number; endAt: number; notes?: string },
+  meta: { raidId: string; raidTitle: string; difficulty: string; startAt: number; endAt: number; notes?: string; status?: string },
   caps: { tank?: number; healer?: number; melee?: number; ranged?: number } | undefined,
-  signups: Array<{ userId: string; username: string; role: RoleKey; classKey?: string; specKey?: string }>
+  signups: Array<{ userId: string; username: string; role: RoleKey; classKey?: string; specKey?: string; createdAtSec?: number }>
 ) {
-  const groups: Record<RoleKey, typeof signups> = {
-    TANK: [], HEALER: [], MELEE: [], RANGED: [], MAYBE: [], ABSENT: [],
-  };
+  const groups: Record<RoleKey, typeof signups> = { TANK: [], HEALER: [], MELEE: [], RANGED: [], MAYBE: [], ABSENT: [] };
   for (const s of signups) groups[s.role]?.push(s);
 
+  const now = Math.floor(Date.now() / 1000);
+  const derived =
+    now < meta.startAt ? 'created' :
+    now >= meta.startAt && now < meta.endAt ? 'started' :
+    'ended';
+  const statusLabel = (meta.status || derived).toLowerCase();
+
+  const committed = groups.TANK.length + groups.HEALER.length + groups.MELEE.length + groups.RANGED.length;
+  const maybes = groups.MAYBE.length;
+
+  const cleanNotes = (meta.notes || '').replace(/^\s*status:.*$/gmi, '').trim();
+
+  const ordered = [...signups]
+    .sort((a, b) => (a.createdAtSec ?? 0) - (b.createdAtSec ?? 0))
+    .map((s, idx) => [s.userId, idx + 1]) as Array<[string, number]>;
+  const orderMap = new Map<string, number>(ordered);
+
+  const HEADER_LINE = '────────────';
+  const block = (arr: typeof signups, role: RoleKey) => {
+    const out: string[] = [HEADER_LINE];
+    if (!arr.length) { out.push('—'); return out.join('\n'); }
+    for (const p of arr) {
+      let icon = '•';
+      if (p.classKey && p.specKey) {
+        const raw = classSpecEmoji(p.classKey, p.specKey, role);
+        icon = ensureEmojiToken(raw, p.classKey, p.specKey);
+      }
+      const idx = orderMap.get(p.userId);
+      const pos = typeof idx === 'number' ? `  **#${idx}**` : '';
+      out.push(`${icon} ${p.username}${pos}`);
+    }
+    return out.join('\n');
+  };
+
   const embed = new EmbedBuilder()
-    .setTitle(meta.raidTitle)
-    .setDescription(meta.notes || '')
+    .setTitle(`${meta.raidTitle.toUpperCase()} (${statusLabel})`)
+    .setDescription([cleanNotes, `👥 **${committed}+${maybes}**`].filter(Boolean).join('\n'))
     .addFields(
       { name: 'Difficulty', value: meta.difficulty || '—', inline: true },
-      { name: 'Start', value: `<t:${meta.startAt}:F> (<t:${meta.startAt}:R>)`, inline: true },
+      { name: 'Start', value: `<t:${meta.startAt}:f>\n(<t:${meta.startAt}:R>)`, inline: true },
       { name: 'End',   value: `<t:${meta.endAt}:t>`, inline: true },
+      { name: '\u200B', value: '\u200B' },
     )
     .addFields(
-      { name: `${ROLE_ICONS.TANK} Tank (${groups.TANK.length}${caps?.tank ? `/${caps.tank}` : ''})`, value: fmtPlayers(groups.TANK.map(u => ({...u, role: 'TANK'}))), inline: true },
-      { name: `${ROLE_ICONS.HEALER} Healer (${groups.HEALER.length}${caps?.healer ? `/${caps.healer}` : ''})`, value: fmtPlayers(groups.HEALER.map(u => ({...u, role: 'HEALER'}))), inline: true },
-      { name: `${ROLE_ICONS.MELEE} Melee (${groups.MELEE.length}${caps?.melee ? `/${caps.melee}` : ''})`, value: fmtPlayers(groups.MELEE.map(u => ({...u, role: 'MELEE'}))), inline: true },
+      { name: `${ROLE_ICONS.TANK} Tank (${groups.TANK.length}${caps?.tank ? `/${caps.tank}` : ''})`, value: block(groups.TANK, 'TANK'), inline: true },
+      { name: `${ROLE_ICONS.HEALER} Healer (${groups.HEALER.length}${caps?.healer ? `/${caps.healer}` : ''})`, value: block(groups.HEALER, 'HEALER'), inline: true },
+      { name: `${ROLE_ICONS.MELEE} Melee (${groups.MELEE.length}${caps?.melee ? `/${caps.melee}` : ''})`, value: block(groups.MELEE, 'MELEE'), inline: true },
     )
     .addFields(
-      { name: `${ROLE_ICONS.RANGED} Ranged (${groups.RANGED.length}${caps?.ranged ? `/${caps.ranged}` : ''})`, value: fmtPlayers(groups.RANGED.map(u => ({...u, role: 'RANGED'}))), inline: true },
-      { name: `${ROLE_ICONS.MAYBE} Maybe (${groups.MAYBE.length})`, value: fmtPlayers(groups.MAYBE.map(u => ({...u, role: 'MAYBE'}))), inline: true },
-      { name: `${ROLE_ICONS.ABSENT} Absent (${groups.ABSENT.length})`, value: fmtPlayers(groups.ABSENT.map(u => ({...u, role: 'ABSENT'}))), inline: true },
+      { name: '\u200B', value: '\u200B', inline: true },
+      { name: '\u200B', value: '\u200B', inline: true },
+      { name: '\u200B', value: '\u200B', inline: true },
+    )
+    .addFields(
+      { name: `${ROLE_ICONS.RANGED} Ranged (${groups.RANGED.length}${caps?.ranged ? `/${caps.ranged}` : ''})`, value: block(groups.RANGED, 'RANGED'), inline: true },
+      { name: `${ROLE_ICONS.MAYBE} Maybe (${groups.MAYBE.length})`, value: block(groups.MAYBE, 'MAYBE'), inline: true },
+      { name: `${ROLE_ICONS.ABSENT} Absent (${groups.ABSENT.length})`, value: block(groups.ABSENT, 'ABSENT'), inline: true },
     )
     .setFooter({ text: `RaidID: ${meta.raidId}` })
     .setColor(getDifficultyColor(meta.difficulty));
@@ -234,36 +235,31 @@ export function buildSignupEmbed(
   return embed;
 }
 
-// ---------- BUTTONS / ROWS ----------
-
-export function roleButtonsRow(raidId: string): ActionRowBuilder<ButtonBuilder> {
+// ---------- BUTTONS / ROWY ----------
+export function roleButtonsRow(raidId: string, disabled = false): ActionRowBuilder<ButtonBuilder> {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId(`signup:role:${raidId}:TANK`).setLabel('Tank').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(`signup:role:${raidId}:HEALER`).setLabel('Healer').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`signup:role:${raidId}:MELEE`).setLabel('Melee').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`signup:role:${raidId}:RANGED`).setLabel('Ranged').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`signup:role:${raidId}:MAYBE`).setLabel('Maybe').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`signup:role:${raidId}:TANK`).setLabel('Tank').setStyle(ButtonStyle.Primary).setDisabled(disabled),
+    new ButtonBuilder().setCustomId(`signup:role:${raidId}:HEALER`).setLabel('Healer').setStyle(ButtonStyle.Success).setDisabled(disabled),
+    new ButtonBuilder().setCustomId(`signup:role:${raidId}:MELEE`).setLabel('Melee').setStyle(ButtonStyle.Secondary).setDisabled(disabled),
+    new ButtonBuilder().setCustomId(`signup:role:${raidId}:RANGED`).setLabel('Ranged').setStyle(ButtonStyle.Secondary).setDisabled(disabled),
+    new ButtonBuilder().setCustomId(`signup:role:${raidId}:MAYBE`).setLabel('Maybe').setStyle(ButtonStyle.Secondary).setDisabled(disabled),
   );
 }
-
-export function changeRoleRow(raidId: string): ActionRowBuilder<ButtonBuilder> {
+export function changeRoleRow(raidId: string, disableSignups = false): ActionRowBuilder<ButtonBuilder> {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId(`signup:changeRole:${raidId}`).setLabel('Change role').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`profile:change:${raidId}`).setLabel('Change class/spec').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`signup:role:${raidId}:ABSENT`).setLabel('Leave').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(`signup:role:${raidId}:ABSENT`).setLabel('Leave').setStyle(ButtonStyle.Danger).setDisabled(disableSignups),
   );
 }
-
-export function rowsForRaid(raidId: string) {
-  return [roleButtonsRow(raidId), changeRoleRow(raidId)];
+export function rowsForRaid(raidId: string, opts?: { allowSignups?: boolean }) {
+  const disabled = opts?.allowSignups === false;
+  return [roleButtonsRow(raidId, disabled), changeRoleRow(raidId, disabled)];
 }
 
-// ---------- INTERACTIONS ----------
-
+// ---------- INTERAKCJE ----------
 export async function handleSignupButton(i: ButtonInteraction, guild: Guild) {
   if (!i.customId.startsWith('signup:') && !i.customId.startsWith('profile:change:')) return false;
 
-  // explicit change class/spec
   if (i.customId.startsWith('profile:change:')) {
     const raidId = i.customId.split(':')[2];
     const current = await prisma.signup.findUnique({
@@ -279,19 +275,26 @@ export async function handleSignupButton(i: ButtonInteraction, guild: Guild) {
     return true;
   }
 
-  const parts = i.customId.split(':'); // signup:role:RAIDID:ROLE  /  signup:changeRole:RAIDID
+  // signup:role:RAIDID:ROLE
+  const parts = i.customId.split(':');
   const kind = parts[1];
-
-  if (kind === 'changeRole') {
-    await i.reply({ content: 'Pick your new role:', components: [roleButtonsRow(parts[2])], ephemeral: true });
-    return true;
-  }
 
   if (kind === 'role') {
     const raidId = parts[2];
     const role = (parts[3] as RoleKey) || 'MAYBE';
     if (!raidId) {
       await i.reply({ content: 'Cannot resolve raid context.', ephemeral: true });
+      return true;
+    }
+
+    const raid = await prisma.raid.findUnique({ where: { raidId } });
+    if (!raid) { await i.reply({ content: 'Raid not found.', ephemeral: true }); return true; }
+
+    const startSec = Math.floor(raid.startAt.getTime() / 1000);
+    const raidStatus = (raid as any)?.status as string | undefined;
+    const allow = typeof raidStatus === 'string' ? (raidStatus === 'CREATED') : signupsOpenByTime(startSec);
+    if (!allow) {
+      await i.reply({ content: 'Signups are closed for this raid.', ephemeral: true });
       return true;
     }
 
@@ -315,7 +318,6 @@ export async function handleSignupButton(i: ButtonInteraction, guild: Guild) {
 
 export async function handleProfileSelect(i: StringSelectMenuInteraction, guild: Guild) {
   if (!i.customId.startsWith('profile:')) return false;
-  // profile:class:RAIDID:ROLE   or   profile:spec:RAIDID:ROLE:CLASS
   const [, kind, raidId, role, cls] = i.customId.split(':');
 
   if (kind === 'class') {
@@ -348,7 +350,6 @@ export async function handleProfileSelect(i: StringSelectMenuInteraction, guild:
 }
 
 // ---------- Helpers ----------
-
 function classSelectRow(raidId: string, forRole: RoleKey) {
   const classes = listClasses();
   const menu = new StringSelectMenuBuilder()
@@ -357,7 +358,6 @@ function classSelectRow(raidId: string, forRole: RoleKey) {
     .addOptions(classes.map(c => ({ label: c, value: c })));
   return new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu);
 }
-
 function specSelectRow(raidId: string, forRole: RoleKey, classKey: string) {
   const specs = listSpecs(classKey);
   const menu = new StringSelectMenuBuilder()
@@ -400,9 +400,9 @@ export async function refreshSignupMessage(guild: Guild, raidId: string) {
   const endDate  = raid.endAt ?? new Date(raid.startAt.getTime() + DEFAULT_DURATION_SEC * 1000);
   const endSec   = Math.floor(endDate.getTime() / 1000);
 
-  // IMPORTANT: pass Guild object to get guild display names
   const signups = await loadSignups(raidId, guild);
 
+  const raidStatus = (raid as any)?.status as string | undefined;
   const embed = buildSignupEmbed(
     {
       raidId,
@@ -411,16 +411,17 @@ export async function refreshSignupMessage(guild: Guild, raidId: string) {
       startAt: startSec,
       endAt: endSec,
       notes: raid.notes || undefined,
+      status: raidStatus,
     },
     undefined,
     signups
   );
   embed.setColor(getDifficultyColor(raid.difficulty));
-  // hard clear any old image so the "purple box" never comes back
   // @ts-ignore
   embed.setImage?.(null);
 
-  const components = rowsForRaid(raidId);
+  const allow = typeof raidStatus === 'string' ? (raidStatus === 'CREATED') : signupsOpenByTime(startSec);
+  const components = rowsForRaid(raidId, { allowSignups: allow });
 
   const msg = await (ch as any).messages?.fetch?.(raid.messageId).catch(() => null);
   if (msg) {

@@ -123,7 +123,7 @@ client.on(Events.InteractionCreate, async (i) => {
 });
 
 async function gracefulShutdown() {
-  console.log('Shutting down…');
+  console.log('Shutting down...');
   try { if (app) await app.close(); } catch {}
   try { client.destroy(); } catch {}
   process.exit(0);

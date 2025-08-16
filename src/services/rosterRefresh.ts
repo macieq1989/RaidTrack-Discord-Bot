@@ -36,7 +36,11 @@ async function refreshRosterNow(guild: Guild, raidId: string) {
   const endDate  = raid.endAt ?? new Date(raid.startAt.getTime() + DEFAULT_DURATION_SEC * 1000);
   const endSec   = Math.floor(endDate.getTime() / 1000);
 
-  const signupsFlat = await loadSignups(raidId);
+  // status z DB jeśli kolumna istnieje; inaczej undefined
+  let statusStr: string | undefined = (raid as any).status;
+  if (typeof statusStr === 'string') statusStr = statusStr.toUpperCase();
+
+  const signupsFlat = await loadSignups(raidId, guild);
   const embed = buildSignupEmbed(
     {
       raidId,
@@ -45,6 +49,7 @@ async function refreshRosterNow(guild: Guild, raidId: string) {
       startAt: startSec,
       endAt: endSec,
       notes: raid.notes || undefined,
+      status: statusStr as any, // opcjonalne; embed poradzi sobie z undefined
     },
     undefined,
     signupsFlat
@@ -62,12 +67,22 @@ async function refreshRosterNow(guild: Guild, raidId: string) {
     });
     embed.setImage(`attachment://${filename}`);
     files = [attachment];
-  } catch (e) {
+  } catch {
     // cicho pomijamy grafikę
   }
 
+  // przyciski włączone tylko gdy status=CREATED; jeśli brak kolumny, fallback na czas
+  const allowSignups =
+    typeof statusStr === 'string'
+      ? statusStr === 'CREATED'
+      : Math.floor(Date.now() / 1000) < startSec;
+
   const msg = await channel.messages?.fetch?.(raid.messageId).catch(() => null);
   if (msg) {
-    await msg.edit({ embeds: [embed], components: rowsForRaid(raidId), files }).catch(() => {});
+    await msg.edit({
+      embeds: [embed],
+      components: rowsForRaid(raidId, { allowSignups }),
+      files,
+    }).catch(() => {});
   }
 }
