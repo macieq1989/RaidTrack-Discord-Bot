@@ -4,14 +4,12 @@ import {
   TextBasedChannel,
   GuildScheduledEventEntityType,
   GuildScheduledEventPrivacyLevel,
-  AttachmentBuilder,
 } from 'discord.js';
 
 import { cfg } from '../config.js';
 import { clampEventTitle, RaidPayload } from './mapping.js';
 import { prisma } from '../util/prisma.js';
-import { buildSignupEmbed, rowsForRaid, loadSignups, toGroupedSignups } from './raidSignup.js';
-import { buildRosterImage } from './rosterImage.js';
+import { buildSignupEmbed, rowsForRaid, loadSignups } from './raidSignup.js';
 
 const CREATE_EVENTS = String(process.env.RAID_CREATE_EVENTS ?? 'true') === 'true';
 const FUTURE_LEEWAY_SEC = Number(process.env.RAID_EVENT_LEEWAY_SEC ?? 300);
@@ -89,43 +87,28 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
   );
   embed.setColor(getDifficultyColor(payload.difficulty));
 
-  // roster tylko jeśli ktoś jest zapisany (Tank/Healer/Melee/Ranged)
-  const anySignup = signupsFlat.some(s =>
-    s.role === 'TANK' || s.role === 'HEALER' || s.role === 'MELEE' || s.role === 'RANGED'
-  );
-
-  const files: AttachmentBuilder[] = [];
-  if (anySignup) {
-    try {
-      const { attachment, filename } = await buildRosterImage({
-        title: payload.raidTitle,
-        startAt: startSec,
-        caps: payload.caps,
-        signups: toGroupedSignups(signupsFlat),
-        guildId: guild.id,
-      });
-      embed.setImage(`attachment://${filename}`);
-      files.push(attachment);
-    } catch {
-      // brak obrazka nie powinien blokować publikacji
-    }
-  }
-
   const components = rowsForRaid(payload.raidId);
 
-  // Message create/update
+  // Message create/update (bez plików/załączników)
   let messageId: string | null = raid.messageId ?? null;
 
   if (messageId) {
     const msg = await (channel as any).messages?.fetch?.(messageId).catch(() => null);
     if (msg) {
-      await msg.edit({ embeds: [embed], components, files }).catch(() => {});
+      await msg.edit({
+        embeds: [embed],
+        components,
+        attachments: [], // upewnij się, że stare obrazki znikną, jeśli wcześniej były
+      }).catch(() => {});
     } else {
       messageId = null;
     }
   }
   if (!messageId) {
-    const sent = await (channel as any).send({ embeds: [embed], components, files }).catch(() => null);
+    const sent = await (channel as any).send({
+      embeds: [embed],
+      components,
+    }).catch(() => null);
     if (sent) messageId = sent.id;
   }
 
