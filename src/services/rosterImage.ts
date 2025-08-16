@@ -3,6 +3,9 @@ import fs from 'fs/promises';
 import path from 'path';
 import sharp from 'sharp';
 import { AttachmentBuilder } from 'discord.js';
+import { prisma } from '../util/prisma.js';
+
+export type RoleKey = 'TANK'|'HEALER'|'MELEE'|'RANGED'|'MAYBE'|'ABSENT';
 
 export type PlayerEntry = {
   userId: string;
@@ -17,6 +20,8 @@ export type SignupsGrouped = {
   melee: PlayerEntry[];
   ranged: PlayerEntry[];
 };
+
+export type RawSignup = { userId: string; username: string; role: RoleKey };
 
 export type RaidCaps = { tank?: number; healer?: number; melee?: number; ranged?: number };
 
@@ -39,13 +44,16 @@ function localIconCandidates(cls?: string, spec?: string) {
 }
 
 async function loadIconForProfile(cls?: string, spec?: string): Promise<Buffer> {
+  // 1) lokalne pliki (zalecane)
   for (const p of localIconCandidates(cls, spec)) {
     if (await fileExists(p)) return fs.readFile(p);
   }
+  // 2) fallback: sama klasa (jeśli masz "rt_paladin.png" itp.)
   if (cls) {
     const alt = path.join(ASSET_ICON_DIR, `rt_${cls.toLowerCase()}.png`);
     if (await fileExists(alt)) return fs.readFile(alt);
   }
+  // 3) opcjonalnie online znak zapytania (jeśli pozwolono)
   if (!ICON_OFFLINE_ONLY) {
     const url = `https://wow.zamimg.com/images/wow/icons/large/inv_misc_questionmark.jpg`;
     const res = await fetch(url as any).catch(() => null);
@@ -54,6 +62,7 @@ async function loadIconForProfile(cls?: string, spec?: string): Promise<Buffer> 
       return sharp(buf).resize(64, 64, { fit: 'cover' }).png().toBuffer();
     }
   }
+  // 4) pusta (przezroczysta) ikona
   return sharp({
     create: { width: 64, height: 64, channels: 4, background: { r:0,g:0,b:0,alpha:0 } }
   }).png().toBuffer();
@@ -101,13 +110,68 @@ function prettySpec(s?: string) {
   return s.replace(/_/g,' ').replace(/\b\w/g, m => m.toUpperCase());
 }
 
+/** Z surowej listy zapisów robi podział na role + (opcjonalnie) dociąga profile z DB. */
+async function groupRawSignups(
+  raw: RawSignup[],
+  guildId?: string
+): Promise<SignupsGrouped> {
+  const grouped: SignupsGrouped = { tank: [], healer: [], melee: [], ranged: [] };
+
+  let profileMap: Record<string, { classKey?: string; specKey?: string }> = {};
+  if (guildId && raw.length) {
+    const ids = Array.from(new Set(raw.map(r => r.userId)));
+    const prof = await prisma.playerProfile.findMany({
+      where: { guildId, userId: { in: ids } },
+      select: { userId: true, classKey: true, specKey: true },
+    });
+    profileMap = Object.fromEntries(prof.map(p => [p.userId, { classKey: p.classKey || undefined, specKey: p.specKey || undefined }]));
+  }
+
+  const push = (key: keyof SignupsGrouped, r: RawSignup) => {
+    const prof = profileMap[r.userId] || {};
+    grouped[key].push({
+      userId: r.userId,
+      displayName: r.username,
+      classKey: prof.classKey,
+      specKey: prof.specKey,
+    });
+  };
+
+  for (const r of raw) {
+    switch (r.role) {
+      case 'TANK':   push('tank',   r); break;
+      case 'HEALER': push('healer', r); break;
+      case 'MELEE':  push('melee',  r); break;
+      case 'RANGED': push('ranged', r); break;
+      // MAYBE/ABSENT pomijamy w grafice rosteru
+      default: break;
+    }
+  }
+  return grouped;
+}
+
+function isGrouped(x: any): x is SignupsGrouped {
+  return x && typeof x === 'object' && Array.isArray(x.tank) && Array.isArray(x.healer) && Array.isArray(x.melee) && Array.isArray(x.ranged);
+}
+
+/**
+ * Buduje obraz rosteru.
+ * - `signups` może być już zgrupowane (SignupsGrouped) lub surowa tablica (RawSignup[]).
+ * - jeśli przekażesz `guildId`, spróbujemy dociągnąć class/spec z PlayerProfile.
+ */
 export async function buildRosterImage(params: {
   title: string;
   startAt: number;         // unix seconds
   caps?: RaidCaps;
-  signups: SignupsGrouped;
+  signups: SignupsGrouped | RawSignup[];
+  guildId?: string;
 }): Promise<{ attachment: AttachmentBuilder; filename: string }> {
-  const { title, startAt, caps, signups } = params;
+  const { title, startAt, caps } = params;
+
+  // Ujednolicenie: zamień RawSignup[] -> SignupsGrouped (+ profile z DB)
+  const signupsGrouped: SignupsGrouped = isGrouped(params.signups)
+    ? params.signups
+    : await groupRawSignups(params.signups as RawSignup[], params.guildId);
 
   const W = 1024, P = 24;
   const COLS = ['tank','healer','melee','ranged'] as const;
@@ -116,10 +180,10 @@ export async function buildRosterImage(params: {
   const rowH = 64, headerH = 72, subH = 28;
 
   const counts = {
-    tank: signups.tank.length,
-    healer: signups.healer.length,
-    melee: signups.melee.length,
-    ranged: signups.ranged.length,
+    tank: signupsGrouped.tank.length,
+    healer: signupsGrouped.healer.length,
+    melee: signupsGrouped.melee.length,
+    ranged: signupsGrouped.ranged.length,
   };
   const maxRows = Math.max(...Object.values(counts), 1);
   const H = headerH + subH + maxRows*rowH + P*2;
@@ -152,7 +216,7 @@ export async function buildRosterImage(params: {
     const left = P + idx*(colW+gap);
     composites.push({ input: svgHeader(headers[role], colW), top: startY, left });
 
-    const list = signups[role];
+    const list = signupsGrouped[role];
     for (let i=0;i<list.length;i++){
       const entry = list[i];
       const top = startY + subH + i*rowH + 8;

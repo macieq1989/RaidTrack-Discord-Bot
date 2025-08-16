@@ -1,7 +1,7 @@
 // src/services/publishRaid.ts
 import {
   Guild, TextBasedChannel,
-  GuildScheduledEventEntityType, GuildScheduledEventPrivacyLevel,
+  GuildScheduledEventEntityType, GuildScheduledEventPrivacyLevel,AttachmentBuilder,
 } from 'discord.js';
 import { cfg } from '../config.js';
 import { clampEventTitle, RaidPayload } from './mapping.js';
@@ -81,6 +81,7 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
       startAt: startSec,
       caps: payload.caps,
       signups: toGroupedSignups(signupsFlat),
+      guildId: guild.id,
     });
     embed.setImage(`attachment://${filename}`);
     files = [attachment];
