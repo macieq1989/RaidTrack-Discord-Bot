@@ -1,4 +1,3 @@
-// src/services/profileIcons.ts
 import { cfg } from '../config.js';
 
 type RoleKey = 'TANK' | 'HEALER' | 'MELEE' | 'RANGED' | 'MAYBE' | 'ABSENT';
@@ -56,7 +55,7 @@ export function classSpecEmoji(
   if (key && cfg.allowExternalEmoji) {
     const raw = cfg.customEmoji?.[key];        // comes from EMOJI_MAP_JSON / EMOJI_MAP
     const token = raw ? toEmojiToken(key, raw) : null;
-    if (token) return token;                    // always "<:name:id>" or "<a:name:id>"
+    if (token) return token;                    // "<:name:id>" or "<a:name:id>"
   }
 
   // fallback (Unicode)

@@ -1,4 +1,3 @@
-// src/services/publishRaid.ts
 import {
   Guild,
   TextBasedChannel,
@@ -71,7 +70,7 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
     },
   });
 
-  // Embed + komponenty
+  // Embed + components
   const signupsFlat = await loadSignups(payload.raidId, guild.id);
   const embed = buildSignupEmbed(
     {
@@ -89,7 +88,7 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
 
   const components = rowsForRaid(payload.raidId);
 
-  // Message create/update (bez plików/załączników)
+  // Message create/update (no images/attachments)
   let messageId: string | null = raid.messageId ?? null;
 
   if (messageId) {
@@ -98,7 +97,7 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
       await msg.edit({
         embeds: [embed],
         components,
-        attachments: [], // upewnij się, że stare obrazki znikną, jeśli wcześniej były
+        attachments: [], // ensure old attachments are cleared if existed
       }).catch(() => {});
     } else {
       messageId = null;
@@ -144,7 +143,7 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
         if (ev) eventId = ev.id;
       }
     } catch {
-      // brak uprawnień lub wyłączone eventy – ignorujemy
+      // ignore permission errors / disabled events
     }
   }
 

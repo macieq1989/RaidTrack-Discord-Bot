@@ -4,8 +4,10 @@ import {
 } from 'discord.js';
 import { prisma } from '../util/prisma.js';
 import { classSpecEmoji } from './profileIcons.js';
+// leave import below if you still queue image refresh elsewhere; safe if unused
 import { queueRosterRefresh } from './rosterRefresh.js';
 import type { PlayerEntry, SignupsGrouped } from './rosterImage.js';
+
 import {
   getPlayerProfile, upsertPlayerProfile, listClasses, listSpecs, isValidClassSpec,
 } from './playerProfile.js';
@@ -13,6 +15,17 @@ import {
 export type RoleKey = 'TANK'|'HEALER'|'MELEE'|'RANGED'|'MAYBE'|'ABSENT';
 
 const DEFAULT_DURATION_SEC = Number(process.env.RAID_EVENT_DEFAULT_DURATION_SEC ?? 3 * 3600);
+
+function getDifficultyColor(diffRaw?: string) {
+  const diff = (diffRaw || '').toUpperCase();
+  const COLORS: Record<string, number> = {
+    LFR: 0x1abc9c,
+    NORMAL: 0x2ecc71,
+    HEROIC: 0xe67e22,
+    MYTHIC: 0xe74c3c,
+  };
+  return COLORS[diff] ?? 0x5865f2;
+}
 
 export function normalizeRole(role: string): RoleKey {
   const u = (role ?? '').toUpperCase();
@@ -22,7 +35,7 @@ export function normalizeRole(role: string): RoleKey {
   return 'MAYBE';
 }
 
-/** Load signups and enrich with class/spec from PlayerProfile (by guildId). */
+/** Load signups and enrich with class/spec + alias from PlayerProfile (by guildId). */
 export async function loadSignups(
   raidId: string,
   guildId?: string
@@ -41,18 +54,14 @@ export async function loadSignups(
   }
 
   const userIds = Array.from(new Set(rows.map(r => r.userId)));
-
-  // Bierzemy pełne rekordy (bez select), a potem czytamy alias z różnych możliwych pól.
   const profiles = await prisma.playerProfile.findMany({
     where: { guildId, userId: { in: userIds } },
   });
 
-  // Mapujemy jako 'any', żeby TS nie krzyczał o nieistniejące pola (serverAlias/characterName itd.)
   const pmap = new Map<string, any>(profiles.map((p: any) => [p.userId, p]));
 
   return rows.map(r => {
     const p: any = pmap.get(r.userId);
-    // Preferencja aliasu (podstaw tu realną nazwę jeśli masz jedną konkretną w schemacie)
     const alias =
       p?.serverAlias ??
       p?.characterName ??
@@ -63,14 +72,13 @@ export async function loadSignups(
 
     return {
       userId: r.userId,
-      username: alias,                    // <-- teraz w embedzie poleci alias zamiast nicku Discord
+      username: alias,                    // alias instead of Discord username
       role: normalizeRole(r.role),
       classKey: p?.classKey || undefined,
       specKey: p?.specKey || undefined,
     };
   });
 }
-
 
 export function toGroupedSignups(
   list: Array<{ userId: string; username: string; role: RoleKey; classKey?: string; specKey?: string; }>
@@ -140,7 +148,8 @@ export function buildSignupEmbed(
       { name: `${ROLE_ICONS.MAYBE} Maybe (${groups.MAYBE.length})`, value: fmtPlayers(groups.MAYBE.map(u => ({...u, role: 'MAYBE'}))), inline: true },
       { name: `${ROLE_ICONS.ABSENT} Absent (${groups.ABSENT.length})`, value: fmtPlayers(groups.ABSENT.map(u => ({...u, role: 'ABSENT'}))), inline: true },
     )
-    .setFooter({ text: `RaidID: ${meta.raidId}` });
+    .setFooter({ text: `RaidID: ${meta.raidId}` })
+    .setColor(getDifficultyColor(meta.difficulty));
 
   return embed;
 }
@@ -160,6 +169,7 @@ export function roleButtonsRow(raidId: string): ActionRowBuilder<ButtonBuilder> 
 export function changeRoleRow(raidId: string): ActionRowBuilder<ButtonBuilder> {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId(`signup:changeRole:${raidId}`).setLabel('Change role').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`profile:change:${raidId}`).setLabel('Change class/spec').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`signup:role:${raidId}:ABSENT`).setLabel('Leave').setStyle(ButtonStyle.Danger),
   );
 }
@@ -171,7 +181,23 @@ export function rowsForRaid(raidId: string) {
 // ---------- INTERACTIONS ----------
 
 export async function handleSignupButton(i: ButtonInteraction, guild: Guild) {
-  if (!i.customId.startsWith('signup:')) return false;
+  if (!i.customId.startsWith('signup:') && !i.customId.startsWith('profile:change:')) return false;
+
+  // allow changing class/spec explicitly
+  if (i.customId.startsWith('profile:change:')) {
+    const raidId = i.customId.split(':')[2];
+    const current = await prisma.signup.findUnique({
+      where: { raidId_userId: { raidId, userId: i.user.id } },
+      select: { role: true },
+    });
+    const roleKey = normalizeRole(current?.role || 'MAYBE');
+    await i.reply({
+      content: 'Pick your **class**:',
+      components: [classSelectRow(raidId, roleKey)],
+      ephemeral: true,
+    });
+    return true;
+  }
 
   const parts = i.customId.split(':'); // signup:role:RAIDID:ROLE  /  signup:changeRole:RAIDID
   const kind = parts[1];
@@ -201,7 +227,8 @@ export async function handleSignupButton(i: ButtonInteraction, guild: Guild) {
 
     await upsertSignupWithProfile(i, guild, raidId, role, profile.classKey, profile.specKey);
     await refreshSignupMessage(guild, raidId);
-    await queueRosterRefresh(guild, raidId);
+    try { queueRosterRefresh(guild, raidId); } catch {}
+
     return true;
   }
 
@@ -210,6 +237,7 @@ export async function handleSignupButton(i: ButtonInteraction, guild: Guild) {
 
 export async function handleProfileSelect(i: StringSelectMenuInteraction, guild: Guild) {
   if (!i.customId.startsWith('profile:')) return false;
+  // profile:class:RAIDID:ROLE   or   profile:spec:RAIDID:ROLE:CLASS
   const [, kind, raidId, role, cls] = i.customId.split(':');
 
   if (kind === 'class') {
@@ -235,6 +263,8 @@ export async function handleProfileSelect(i: StringSelectMenuInteraction, guild:
     await upsertPlayerProfile(guild.id, i.user.id, pickedClass, pickedSpec);
     await upsertSignupWithProfile(i, guild, raidId, roleKey, pickedClass, pickedSpec, true);
     await refreshSignupMessage(guild, raidId);
+    try { queueRosterRefresh(guild, raidId); } catch {}
+
     return true;
   }
 
@@ -263,14 +293,14 @@ function specSelectRow(raidId: string, forRole: RoleKey, classKey: string) {
 
 async function upsertSignupWithProfile(
   i: ButtonInteraction | StringSelectMenuInteraction,
-  guild: Guild,
+  _guild: Guild,
   raidId: string,
   role: RoleKey,
   classKey?: string,
   specKey?: string,
   _updateMessage = false
 ) {
-  // zapisujemy TYLKO rolę w signup; klasa/spec są w PlayerProfile
+  // store only role in signup; class/spec live in PlayerProfile
   await prisma.signup.upsert({
     where: { raidId_userId: { raidId, userId: i.user.id } },
     create: { raidId, userId: i.user.id, username: i.user.username, role },
@@ -308,10 +338,12 @@ export async function refreshSignupMessage(guild: Guild, raidId: string) {
     undefined,
     signups
   );
+  embed.setColor(getDifficultyColor(raid.difficulty));
+
   const components = rowsForRaid(raidId);
 
   const msg = await (ch as any).messages?.fetch?.(raid.messageId).catch(() => null);
   if (msg) {
-    await msg.edit({ embeds: [embed], components }).catch(() => {});
+    await msg.edit({ embeds: [embed], components, attachments: [] }).catch(() => {});
   }
 }

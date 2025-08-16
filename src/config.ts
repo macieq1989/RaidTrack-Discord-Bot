@@ -4,7 +4,7 @@ import 'dotenv/config';
 function parseEmojiMap(): Record<string, string> {
   const out: Record<string, string> = {};
 
-  // Highest priority: JSON blob
+  // Highest priority: JSON blob (must be one line in .env)
   const json = process.env.EMOJI_MAP_JSON;
   if (json) {
     try {
@@ -37,7 +37,7 @@ export const cfg = {
   databaseUrl: process.env.DATABASE_URL ?? 'file:./data/db.sqlite',
   tz: process.env.TZ ?? 'Europe/London',
 
-  // Routing kanałów
+  // Channel routing
   fallbackChannel: process.env.CH_FALLBACK || process.env.FALLBACK_CHANNEL_ID || '',
   channelRouting: {
     NORMAL: process.env.CH_NORMAL || '',
@@ -57,16 +57,13 @@ export const cfg = {
   },
   sessionSecret: process.env.SESSION_SECRET ?? 'change-me',
 
-  // Autoryzacja
+  // Auth
   allowedGuildId: process.env.ALLOWED_GUILD_ID ?? '',
   officerRoleId: process.env.OFFICER_ROLE_ID ?? '',
 
-  // --- External custom emoji (for class/spec icons) ---
-  // Bot must be a member of the emoji guild and have "Use External Emojis" in the target guild.
+  // External custom emoji (kept on a separate "emoji server")
   emojiGuildId: process.env.EMOJI_GUILD_ID ?? '',
   allowExternalEmoji: String(process.env.ALLOW_EXTERNAL_EMOJI ?? 'true') === 'true',
-  // Map: "class_spec" (lowercase) -> emoji id
-  // Example sources: EMOJI_MAP_JSON='{"paladin_retribution":"123...","warrior_arms":"456..."}'
-  // or EMOJI_MAP='paladin_retribution:123... warrior_arms:456...'
+  // Map: "class_spec" (lowercase) -> emoji id or full token ("<:name:id>" / "<a:name:id>") or "a:ID"
   customEmoji: parseEmojiMap(),
 } as const;
