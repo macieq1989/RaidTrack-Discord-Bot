@@ -207,21 +207,18 @@ export function buildSignupEmbed(
   };
   for (const s of signups) groups[s.role]?.push(s);
 
-  // status obok tytułu (na podstawie czasu)
   const now = Math.floor(Date.now() / 1000);
   const status =
     now < meta.startAt ? 'created' :
     now >= meta.startAt && now < meta.endAt ? 'started' :
     'ended';
 
-  // licznik: committed + maybes
   const committed = groups.TANK.length + groups.HEALER.length + groups.MELEE.length + groups.RANGED.length;
   const maybes = groups.MAYBE.length;
 
-  // notes bez linii zaczynającej się od "status:" (jeśli przychodzi z importu)
   const cleanNotes = (meta.notes || '').replace(/^\s*status:.*$/gmi, '').trim();
 
-  // mapowanie: userId -> globalny numer zapisu (1..N wg createdAt)
+  // globalna kolejność zapisu
   const ordered = [...signups]
     .sort((a, b) => (a.createdAtSec ?? 0) - (b.createdAtSec ?? 0))
     .map((s, idx) => [s.userId, idx + 1]) as Array<[string, number]>;
@@ -229,20 +226,23 @@ export function buildSignupEmbed(
 
   const HEADER_LINE = '────────────';
 
-  // renderer linii graczy (z numerkiem #)
   const fmtPlayers = (arr: typeof signups, role: RoleKey) => {
-    if (!arr.length) return '—';
-    return [HEADER_LINE, ...arr.map(p => {
-      // emoji klasy/spec
+    const out: string[] = [HEADER_LINE];           // ZAWSZE podkreślenie jako 1. linia
+    if (!arr.length) {
+      out.push('—');
+      return out.join('\n');
+    }
+    for (const p of arr) {
       let icon = '•';
       if (p.classKey && p.specKey) {
         const raw = classSpecEmoji(p.classKey, p.specKey, role);
         icon = ensureEmojiToken(raw, p.classKey, p.specKey);
       }
       const idx = orderMap.get(p.userId);
-      const pos = typeof idx === 'number' ? `  #${idx}` : '';
-      return `${icon} ${p.username}${pos}`;
-    })].join('\n');
+      const pos = typeof idx === 'number' ? `  **#${idx}**` : '';
+      out.push(`${icon} ${p.username}${pos}`);
+    }
+    return out.join('\n');
   };
 
   const embed = new EmbedBuilder()
@@ -251,18 +251,24 @@ export function buildSignupEmbed(
       [cleanNotes, `👥 **${committed}+${maybes}**`].filter(Boolean).join('\n')
     )
     .addFields(
-      // Start bez dnia tygodnia: <t:...:f> i przeniesione "relative" pod spód
       { name: 'Difficulty', value: meta.difficulty || '—', inline: true },
-      { name: 'Start', value: `<t:${meta.startAt}:f>\n(<t:${meta.startAt}:R>)`, inline: true },
+      { name: 'Start', value: `<t:${meta.startAt}:f>\n(<t:${meta.startAt}:R>)`, inline: true }, // bez dnia tygodnia; "ago" w 2. linii
       { name: 'End',   value: `<t:${meta.endAt}:t>`, inline: true },
-      // odstęp między metadanymi a kolumnami ról
-      { name: '\u200B', value: '\u200B' },
+      { name: '\u200B', value: '\u200B' }, // mały odstęp między metadanymi a kolumnami ról
     )
     .addFields(
       { name: `🛡️ Tank (${groups.TANK.length}${caps?.tank ? `/${caps.tank}` : ''})`, value: fmtPlayers(groups.TANK, 'TANK'), inline: true },
       { name: `✨ Healer (${groups.HEALER.length}${caps?.healer ? `/${caps.healer}` : ''})`, value: fmtPlayers(groups.HEALER, 'HEALER'), inline: true },
       { name: `⚔️ Melee (${groups.MELEE.length}${caps?.melee ? `/${caps.melee}` : ''})`, value: fmtPlayers(groups.MELEE, 'MELEE'), inline: true },
     )
+    // SPACER między pierwszym wierszem ról a drugim (Tank/Healer/Melee vs Ranged/Maybe/Absent)
+    // mniejszy odstęp – jeden „wiersz” z trzema pustymi polami inline
+.addFields(
+  { name: '\u200B', value: '\u200B', inline: true },
+  { name: '\u200B', value: '\u200B', inline: true },
+  { name: '\u200B', value: '\u200B', inline: true },
+)
+
     .addFields(
       { name: `🏹 Ranged (${groups.RANGED.length}${caps?.ranged ? `/${caps.ranged}` : ''})`, value: fmtPlayers(groups.RANGED, 'RANGED'), inline: true },
       { name: `❔ Maybe (${groups.MAYBE.length})`, value: fmtPlayers(groups.MAYBE, 'MAYBE'), inline: true },
@@ -273,6 +279,7 @@ export function buildSignupEmbed(
 
   return embed;
 }
+
 
 
 // ---------- BUTTONS / ROWY ----------
