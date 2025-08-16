@@ -12,7 +12,6 @@ import {
 } from './playerProfile.js';
 
 export type RoleKey = 'TANK'|'HEALER'|'MELEE'|'RANGED'|'MAYBE'|'ABSENT';
-export type RaidStatus = 'CREATED'|'STARTED'|'ENDED';
 
 // ---------- normalizacja + emoji helpery ----------
 function normToken(s?: string) {
@@ -25,21 +24,12 @@ function normClass(s?: string) {
   return t;
 }
 const SPEC_ALIASES: Record<string, string> = {
-  retri: 'retribution',
-  retributions: 'retribution',
-  prot: 'protection',
-  disc: 'discipline',
-  bm: 'beast_mastery',
-  mm: 'marksmanship',
-  marks: 'marksmanship',
-  surv: 'survival',
-  enh: 'enhancement',
-  ele: 'elemental',
-  resto: 'restoration',
-  destro: 'destruction',
-  affli: 'affliction',
-  demo: 'demonology',
-  arc: 'arcane',
+  retri: 'retribution', retributions: 'retribution',
+  prot: 'protection',   disc: 'discipline',
+  bm: 'beast_mastery',  mm: 'marksmanship', marks: 'marksmanship',
+  surv: 'survival',     enh: 'enhancement', ele: 'elemental',
+  resto: 'restoration', destro: 'destruction', affli: 'affliction',
+  demo: 'demonology',   arc: 'arcane',
 };
 function normSpec(s?: string) {
   let t = normToken(s);
@@ -54,23 +44,22 @@ function keyFor(cls?: string, spec?: string) {
 function toEmojiToken(name: string, value: string): string | null {
   const v = (value ?? '').trim();
   if (!v) return null;
-  if (/^<a?:[^:>]+:\d+>$/.test(v)) return v;               // pełny token
-  const m = /^a:(\d+)$/.exec(v); if (m) return `<a:${name}:${m[1]}>`; // anim
-  if (/^\d+$/.test(v)) return `<:${name}:${v}>`;            // statyczne ID
+  if (/^<a?:[^:>]+:\d+>$/.test(v)) return v;
+  const m = /^a:(\d+)$/.exec(v); if (m) return `<a:${name}:${m[1]}>`;
+  if (/^\d+$/.test(v)) return `<:${name}:${v}>`;
   return null;
 }
-/** Zamienia ':class_spec:' -> '<:class_spec:ID>' jeśli mamy ID w cfg.customEmoji */
 function ensureEmojiToken(maybe: string, cls?: string, spec?: string): string {
   if (/^:[^:]+:$/.test((maybe ?? '').trim())) {
     const k = keyFor(cls, spec);
-    const raw = k ? cfg.customEmoji?.[k] : undefined;
+    const raw = k ? (cfg.customEmoji as any)?.[k] : undefined;
     const tok = raw ? toEmojiToken(k!, raw) : null;
     if (tok) return tok;
   }
   return maybe;
 }
 
-// ---------- stałe / kolor trudności ----------
+// ---------- stałe / kolor ----------
 const DEFAULT_DURATION_SEC = Number(process.env.RAID_EVENT_DEFAULT_DURATION_SEC ?? 3 * 3600);
 
 function getDifficultyColor(diffRaw?: string) {
@@ -83,6 +72,9 @@ function getDifficultyColor(diffRaw?: string) {
   };
   return COLORS[diff] ?? 0x5865f2;
 }
+function signupsOpenByTime(startSec: number) {
+  return Math.floor(Date.now() / 1000) < startSec;
+}
 
 export function normalizeRole(role: string): RoleKey {
   const u = (role ?? '').toUpperCase();
@@ -92,10 +84,7 @@ export function normalizeRole(role: string): RoleKey {
   return 'MAYBE';
 }
 
-/**
- * Wczytuje zapisy + (opcjonalnie) profil i serwerowe wyświetlane nazwy.
- * Dodatkowo zwraca createdAtSec do liczenia kolejności.
- */
+/** Wczytuje zapisy + profil + serwerowe displayName; zwraca też createdAtSec */
 export async function loadSignups(
   raidId: string,
   guildOrId?: Guild | string
@@ -109,7 +98,7 @@ export async function loadSignups(
   const guildId  = typeof guildOrId === 'string' ? guildOrId : guildOrId?.id;
   const guildObj = typeof guildOrId === 'object' ? (guildOrId as Guild) : undefined;
 
-  // Profile (pola z aktualnego schematu)
+  // Profile
   let pmap = new Map<string, { classKey?: string; specKey?: string }>();
   if (guildId) {
     const ids = Array.from(new Set(rows.map(r => r.userId)));
@@ -120,7 +109,7 @@ export async function loadSignups(
     pmap = new Map(profiles.map(p => [p.userId, { classKey: p.classKey ?? undefined, specKey: p.specKey ?? undefined }]));
   }
 
-  // Wyświetlane nazwy z gildii (bulk)
+  // Display names
   const display = new Map<string, string>();
   if (guildObj) {
     const uniqueIds = Array.from(new Set(rows.map(r => r.userId)));
@@ -133,10 +122,9 @@ export async function loadSignups(
     }
   }
 
-  // Compose output
   return rows.map(r => {
     const prof = pmap.get(r.userId);
-    const name = display.get(r.userId) || r.username; // serwerowy nick lub zapasowo z DB
+    const name = display.get(r.userId) || r.username;
     return {
       userId: r.userId,
       username: name,
@@ -148,7 +136,6 @@ export async function loadSignups(
   });
 }
 
-/** Group for potential roster image usage */
 export function toGroupedSignups(
   list: Array<{ userId: string; username: string; role: RoleKey; classKey?: string; specKey?: string; }>
 ): SignupsGrouped {
@@ -172,40 +159,30 @@ export function toGroupedSignups(
 }
 
 // ---------- EMBED ----------
-
 const ROLE_ICONS: Record<RoleKey,string> = {
-  TANK:   '🛡️',
-  HEALER: '✨',
-  MELEE:  '⚔️',
-  RANGED: '🏹',
-  MAYBE:  '❔',
-  ABSENT: '🚫',
+  TANK: '🛡️', HEALER: '✨', MELEE: '⚔️', RANGED: '🏹', MAYBE: '❔', ABSENT: '🚫',
 };
 
 export function buildSignupEmbed(
-  meta: {
-    raidId: string;
-    raidTitle: string;
-    difficulty: string;
-    startAt: number;
-    endAt: number;
-    notes?: string;
-    status: RaidStatus; // <-- status z DB
-  },
+  meta: { raidId: string; raidTitle: string; difficulty: string; startAt: number; endAt: number; notes?: string; status?: string },
   caps: { tank?: number; healer?: number; melee?: number; ranged?: number } | undefined,
   signups: Array<{ userId: string; username: string; role: RoleKey; classKey?: string; specKey?: string; createdAtSec?: number }>
 ) {
-  const groups: Record<RoleKey, typeof signups> = {
-    TANK: [], HEALER: [], MELEE: [], RANGED: [], MAYBE: [], ABSENT: [],
-  };
+  const groups: Record<RoleKey, typeof signups> = { TANK: [], HEALER: [], MELEE: [], RANGED: [], MAYBE: [], ABSENT: [] };
   for (const s of signups) groups[s.role]?.push(s);
+
+  const now = Math.floor(Date.now() / 1000);
+  const derived =
+    now < meta.startAt ? 'created' :
+    now >= meta.startAt && now < meta.endAt ? 'started' :
+    'ended';
+  const statusLabel = (meta.status || derived).toLowerCase();
 
   const committed = groups.TANK.length + groups.HEALER.length + groups.MELEE.length + groups.RANGED.length;
   const maybes = groups.MAYBE.length;
 
   const cleanNotes = (meta.notes || '').replace(/^\s*status:.*$/gmi, '').trim();
 
-  // globalna kolejność zapisu
   const ordered = [...signups]
     .sort((a, b) => (a.createdAtSec ?? 0) - (b.createdAtSec ?? 0))
     .map((s, idx) => [s.userId, idx + 1]) as Array<[string, number]>;
@@ -229,7 +206,7 @@ export function buildSignupEmbed(
   };
 
   const embed = new EmbedBuilder()
-    .setTitle(`${meta.raidTitle.toUpperCase()} (${meta.status.toLowerCase()})`)
+    .setTitle(`${meta.raidTitle.toUpperCase()} (${statusLabel})`)
     .setDescription([cleanNotes, `👥 **${committed}+${maybes}**`].filter(Boolean).join('\n'))
     .addFields(
       { name: 'Difficulty', value: meta.difficulty || '—', inline: true },
@@ -242,7 +219,6 @@ export function buildSignupEmbed(
       { name: `${ROLE_ICONS.HEALER} Healer (${groups.HEALER.length}${caps?.healer ? `/${caps.healer}` : ''})`, value: block(groups.HEALER, 'HEALER'), inline: true },
       { name: `${ROLE_ICONS.MELEE} Melee (${groups.MELEE.length}${caps?.melee ? `/${caps.melee}` : ''})`, value: block(groups.MELEE, 'MELEE'), inline: true },
     )
-    // mniejszy spacer między wierszami ról
     .addFields(
       { name: '\u200B', value: '\u200B', inline: true },
       { name: '\u200B', value: '\u200B', inline: true },
@@ -260,7 +236,6 @@ export function buildSignupEmbed(
 }
 
 // ---------- BUTTONS / ROWY ----------
-
 export function roleButtonsRow(raidId: string, disabled = false): ActionRowBuilder<ButtonBuilder> {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId(`signup:role:${raidId}:TANK`).setLabel('Tank').setStyle(ButtonStyle.Primary).setDisabled(disabled),
@@ -270,25 +245,21 @@ export function roleButtonsRow(raidId: string, disabled = false): ActionRowBuild
     new ButtonBuilder().setCustomId(`signup:role:${raidId}:MAYBE`).setLabel('Maybe').setStyle(ButtonStyle.Secondary).setDisabled(disabled),
   );
 }
-
 export function changeRoleRow(raidId: string, disableSignups = false): ActionRowBuilder<ButtonBuilder> {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId(`profile:change:${raidId}`).setLabel('Change class/spec').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`signup:role:${raidId}:ABSENT`).setLabel('Leave').setStyle(ButtonStyle.Danger).setDisabled(disableSignups),
   );
 }
-
 export function rowsForRaid(raidId: string, opts?: { allowSignups?: boolean }) {
   const disabled = opts?.allowSignups === false;
   return [roleButtonsRow(raidId, disabled), changeRoleRow(raidId, disabled)];
 }
 
 // ---------- INTERAKCJE ----------
-
 export async function handleSignupButton(i: ButtonInteraction, guild: Guild) {
   if (!i.customId.startsWith('signup:') && !i.customId.startsWith('profile:change:')) return false;
 
-  // explicit change class/spec
   if (i.customId.startsWith('profile:change:')) {
     const raidId = i.customId.split(':')[2];
     const current = await prisma.signup.findUnique({
@@ -316,10 +287,13 @@ export async function handleSignupButton(i: ButtonInteraction, guild: Guild) {
       return true;
     }
 
-    // BLOKADA po statusie z DB (nie po czasie!)
     const raid = await prisma.raid.findUnique({ where: { raidId } });
     if (!raid) { await i.reply({ content: 'Raid not found.', ephemeral: true }); return true; }
-    if ((raid as any).status !== 'CREATED') {
+
+    const startSec = Math.floor(raid.startAt.getTime() / 1000);
+    const raidStatus = (raid as any)?.status as string | undefined;
+    const allow = typeof raidStatus === 'string' ? (raidStatus === 'CREATED') : signupsOpenByTime(startSec);
+    if (!allow) {
       await i.reply({ content: 'Signups are closed for this raid.', ephemeral: true });
       return true;
     }
@@ -344,7 +318,6 @@ export async function handleSignupButton(i: ButtonInteraction, guild: Guild) {
 
 export async function handleProfileSelect(i: StringSelectMenuInteraction, guild: Guild) {
   if (!i.customId.startsWith('profile:')) return false;
-  // profile:class:RAIDID:ROLE   or   profile:spec:RAIDID:ROLE:CLASS
   const [, kind, raidId, role, cls] = i.customId.split(':');
 
   if (kind === 'class') {
@@ -377,7 +350,6 @@ export async function handleProfileSelect(i: StringSelectMenuInteraction, guild:
 }
 
 // ---------- Helpers ----------
-
 function classSelectRow(raidId: string, forRole: RoleKey) {
   const classes = listClasses();
   const menu = new StringSelectMenuBuilder()
@@ -386,7 +358,6 @@ function classSelectRow(raidId: string, forRole: RoleKey) {
     .addOptions(classes.map(c => ({ label: c, value: c })));
   return new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu);
 }
-
 function specSelectRow(raidId: string, forRole: RoleKey, classKey: string) {
   const specs = listSpecs(classKey);
   const menu = new StringSelectMenuBuilder()
@@ -431,6 +402,7 @@ export async function refreshSignupMessage(guild: Guild, raidId: string) {
 
   const signups = await loadSignups(raidId, guild);
 
+  const raidStatus = (raid as any)?.status as string | undefined;
   const embed = buildSignupEmbed(
     {
       raidId,
@@ -439,18 +411,17 @@ export async function refreshSignupMessage(guild: Guild, raidId: string) {
       startAt: startSec,
       endAt: endSec,
       notes: raid.notes || undefined,
-      status: (raid as any).status as RaidStatus, // <-- status z DB
+      status: raidStatus,
     },
     undefined,
     signups
   );
   embed.setColor(getDifficultyColor(raid.difficulty));
-  // twarde czyszczenie obrazka – zero „fioletowego boxa”
   // @ts-ignore
   embed.setImage?.(null);
 
-  const allowSignups = (raid as any).status === 'CREATED';
-  const components = rowsForRaid(raidId, { allowSignups });
+  const allow = typeof raidStatus === 'string' ? (raidStatus === 'CREATED') : signupsOpenByTime(startSec);
+  const components = rowsForRaid(raidId, { allowSignups: allow });
 
   const msg = await (ch as any).messages?.fetch?.(raid.messageId).catch(() => null);
   if (msg) {

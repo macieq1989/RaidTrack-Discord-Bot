@@ -40,7 +40,7 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
   if (!fetched || !isText) throw new Error(`No access to text channel ${chId}`);
   const channel = fetched as TextBasedChannel;
 
-  // Compute timestamps (dla embeda / eventów)
+  // Timestamps
   const nowSec = Math.floor(Date.now() / 1000);
   let startSec = Number(payload.startAt || (nowSec + FUTURE_LEEWAY_SEC));
   let endSec = payload.endAt != null ? Number(payload.endAt) : (startSec + DEFAULT_DURATION_SEC);
@@ -49,7 +49,7 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
 
   const isPast = startSec < (nowSec + FUTURE_LEEWAY_SEC);
 
-  // DB upsert
+  // DB upsert (UWAGA: NIE zapisujemy 'status'!)
   const raid = await prisma.raid.upsert({
     where: { raidId: payload.raidId },
     create: {
@@ -60,7 +60,6 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
       endAt: new Date(endSec * 1000),
       notes: payload.notes ?? '',
       channelId: chId,
-      // status: default 'CREATED' z bazy
     },
     update: {
       raidTitle: payload.raidTitle,
@@ -69,13 +68,16 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
       endAt: new Date(endSec * 1000),
       notes: payload.notes ?? '',
       channelId: chId,
-      // status NIE jest wyliczany z czasu
     },
   });
 
-  // status tylko z DB
-  const raidStatus = (raid as any).status ?? 'CREATED';
-  const allowSignups = raidStatus === 'CREATED';
+  // Status tylko do odczytu (może nie istnieć w tej bazie)
+  const raidStatus = (raid as any)?.status as string | undefined;
+  // Jeśli status istnieje -> tylko CREATED pozwala na zapisy
+  // Jeśli nie istnieje -> fallback na czas (jak dawniej)
+  const allowSignups = typeof raidStatus === 'string'
+    ? raidStatus === 'CREATED'
+    : (Math.floor(Date.now() / 1000) < startSec);
 
   // Embed + components
   const signupsFlat = await loadSignups(payload.raidId, guild);
@@ -87,7 +89,7 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
       startAt: startSec,
       endAt: endSec,
       notes: payload.notes,
-      status: raidStatus as 'CREATED'|'STARTED'|'ENDED',
+      status: raidStatus, // tylko do wyświetlenia, jeśli jest
     },
     payload.caps,
     signupsFlat,
@@ -105,25 +107,22 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
       await msg.edit({
         embeds: [embed],
         components,
-        attachments: [], // czyści stare załączniki, jeśli były
+        attachments: [],
       }).catch(() => {});
     } else {
       messageId = null;
     }
   }
   if (!messageId) {
-    const sent = await (channel as any).send({
-      embeds: [embed],
-      components,
-    }).catch(() => null);
+    const sent = await (channel as any).send({ embeds: [embed], components }).catch(() => null);
     if (sent) messageId = sent.id;
   }
 
-  // Scheduled event tylko dla CREATED i przyszłości
+  // Scheduled event: tylko gdy przyszłość
   let eventId: string | null = raid.scheduledEventId ?? null;
   const eventName = clampEventTitle(payload.raidTitle);
 
-  if (CREATE_EVENTS && raidStatus === 'CREATED' && !isPast) {
+  if (CREATE_EVENTS && !isPast) {
     try {
       if (eventId) {
         const ev = await guild.scheduledEvents.fetch(eventId).catch(() => null);
@@ -151,7 +150,7 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
         if (ev) eventId = ev.id;
       }
     } catch {
-      // ignore lack of perms / disabled events
+      // ignore
     }
   }
 

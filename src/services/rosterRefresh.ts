@@ -1,13 +1,7 @@
 // src/services/rosterRefresh.ts
 import type { Guild } from 'discord.js';
 import { prisma } from '../util/prisma.js';
-import {
-  loadSignups,
-  toGroupedSignups,
-  rowsForRaid,
-  buildSignupEmbed,
-  type RaidStatus,            // <-- import typu statusu
-} from './raidSignup.js';
+import { loadSignups, toGroupedSignups, rowsForRaid, buildSignupEmbed } from './raidSignup.js';
 import { buildRosterImage } from './rosterImage.js';
 
 const DEFAULT_DURATION_SEC = Number(process.env.RAID_EVENT_DEFAULT_DURATION_SEC ?? 3 * 3600);
@@ -42,13 +36,11 @@ async function refreshRosterNow(guild: Guild, raidId: string) {
   const endDate  = raid.endAt ?? new Date(raid.startAt.getTime() + DEFAULT_DURATION_SEC * 1000);
   const endSec   = Math.floor(endDate.getTime() / 1000);
 
-  // status z DB = źródło prawdy
-  const status: RaidStatus = (raid as any).status ?? 'CREATED';
-  const allowSignups = status === 'CREATED';
+  // status z DB jeśli kolumna istnieje; inaczej undefined
+  let statusStr: string | undefined = (raid as any).status;
+  if (typeof statusStr === 'string') statusStr = statusStr.toUpperCase();
 
-  // weź wyświetlane nicki (przekazujemy Guild) + class/spec z profilu
   const signupsFlat = await loadSignups(raidId, guild);
-
   const embed = buildSignupEmbed(
     {
       raidId,
@@ -57,7 +49,7 @@ async function refreshRosterNow(guild: Guild, raidId: string) {
       startAt: startSec,
       endAt: endSec,
       notes: raid.notes || undefined,
-      status, // <-- KLUCZOWE
+      status: statusStr as any, // opcjonalne; embed poradzi sobie z undefined
     },
     undefined,
     signupsFlat
@@ -79,11 +71,17 @@ async function refreshRosterNow(guild: Guild, raidId: string) {
     // cicho pomijamy grafikę
   }
 
+  // przyciski włączone tylko gdy status=CREATED; jeśli brak kolumny, fallback na czas
+  const allowSignups =
+    typeof statusStr === 'string'
+      ? statusStr === 'CREATED'
+      : Math.floor(Date.now() / 1000) < startSec;
+
   const msg = await channel.messages?.fetch?.(raid.messageId).catch(() => null);
   if (msg) {
     await msg.edit({
       embeds: [embed],
-      components: rowsForRaid(raidId, { allowSignups }), // <-- przyciski aktywne tylko gdy CREATED
+      components: rowsForRaid(raidId, { allowSignups }),
       files,
     }).catch(() => {});
   }
