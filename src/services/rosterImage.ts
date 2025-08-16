@@ -10,8 +10,8 @@ export type RoleKey = 'TANK'|'HEALER'|'MELEE'|'RANGED'|'MAYBE'|'ABSENT';
 export type PlayerEntry = {
   userId: string;
   displayName: string;
-  classKey?: string; // 'paladin', 'warrior', ...
-  specKey?: string;  // 'holy', 'protection', ...
+  classKey?: string;
+  specKey?: string;
 };
 
 export type SignupsGrouped = {
@@ -22,7 +22,6 @@ export type SignupsGrouped = {
 };
 
 export type RawSignup = { userId: string; username: string; role: RoleKey };
-
 export type RaidCaps = { tank?: number; healer?: number; melee?: number; ranged?: number };
 
 const ASSET_ICON_DIR = process.env.ASSET_ICON_DIR || '/app/assets/icons';
@@ -44,27 +43,27 @@ function localIconCandidates(cls?: string, spec?: string) {
 }
 
 async function loadIconForProfile(cls?: string, spec?: string): Promise<Buffer> {
-  // 1) lokalne pliki (zalecane)
+  // 1) pełna ikona class+spec
   for (const p of localIconCandidates(cls, spec)) {
     if (await fileExists(p)) return fs.readFile(p);
   }
-  // 2) fallback: sama klasa (jeśli masz "rt_paladin.png" itp.)
+  // 2) fallback: sama klasa
   if (cls) {
     const alt = path.join(ASSET_ICON_DIR, `rt_${cls.toLowerCase()}.png`);
     if (await fileExists(alt)) return fs.readFile(alt);
   }
-  // 3) opcjonalnie online znak zapytania (jeśli pozwolono)
+  // 3) online znak zapytania
   if (!ICON_OFFLINE_ONLY) {
     const url = `https://wow.zamimg.com/images/wow/icons/large/inv_misc_questionmark.jpg`;
     const res = await fetch(url as any).catch(() => null);
     if (res?.ok) {
       const buf = Buffer.from(await res.arrayBuffer());
-      return sharp(buf).resize(64, 64, { fit: 'cover' }).png().toBuffer();
+      return sharp(buf).resize(48, 48).png().toBuffer();
     }
   }
-  // 4) pusta (przezroczysta) ikona
+  // 4) przezroczysta placeholder
   return sharp({
-    create: { width: 64, height: 64, channels: 4, background: { r:0,g:0,b:0,alpha:0 } }
+    create: { width: 48, height: 48, channels: 4, background: { r:0,g:0,b:0,alpha:0 } }
   }).png().toBuffer();
 }
 
@@ -89,7 +88,7 @@ function svgText(label: string, width: number, height: number, fill = '#E5E7EB',
   return Buffer.from(
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">
       <style>.t{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,'Noto Sans',sans-serif;font-weight:600;fill:${fill};font-size:${size}px;}</style>
-      <text x="0" y="${Math.round(height*0.72)}" class="t">${esc}</text>
+      <text x="0" y="${Math.round(height*0.7)}" class="t">${esc}</text>
     </svg>`
   );
 }
@@ -98,8 +97,8 @@ function svgHeader(label: string, width: number, accent = '#64748B') {
   const esc = label.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   return Buffer.from(
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="28">
-      <rect x="0" y="18" width="${width}" height="3" fill="${accent}" />
-      <style>.h{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,'Noto Sans',sans-serif;font-weight:700;fill:#CBD5E1;font-size:16px;}</style>
+      <rect x="0" y="20" width="${width}" height="2" fill="${accent}" />
+      <style>.h{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,'Noto Sans',sans-serif;font-weight:700;fill:#CBD5E1;font-size:15px;}</style>
       <text x="0" y="16" class="h">${esc}</text>
     </svg>`
   );
@@ -110,13 +109,8 @@ function prettySpec(s?: string) {
   return s.replace(/_/g,' ').replace(/\b\w/g, m => m.toUpperCase());
 }
 
-/** Z surowej listy zapisów robi podział na role + (opcjonalnie) dociąga profile z DB. */
-async function groupRawSignups(
-  raw: RawSignup[],
-  guildId?: string
-): Promise<SignupsGrouped> {
+async function groupRawSignups(raw: RawSignup[], guildId?: string): Promise<SignupsGrouped> {
   const grouped: SignupsGrouped = { tank: [], healer: [], melee: [], ranged: [] };
-
   let profileMap: Record<string, { classKey?: string; specKey?: string }> = {};
   if (guildId && raw.length) {
     const ids = Array.from(new Set(raw.map(r => r.userId)));
@@ -124,9 +118,10 @@ async function groupRawSignups(
       where: { guildId, userId: { in: ids } },
       select: { userId: true, classKey: true, specKey: true },
     });
-    profileMap = Object.fromEntries(prof.map(p => [p.userId, { classKey: p.classKey || undefined, specKey: p.specKey || undefined }]));
+    profileMap = Object.fromEntries(
+      prof.map(p => [p.userId, { classKey: p.classKey || undefined, specKey: p.specKey || undefined }])
+    );
   }
-
   const push = (key: keyof SignupsGrouped, r: RawSignup) => {
     const prof = profileMap[r.userId] || {};
     grouped[key].push({
@@ -136,39 +131,29 @@ async function groupRawSignups(
       specKey: prof.specKey,
     });
   };
-
   for (const r of raw) {
     switch (r.role) {
-      case 'TANK':   push('tank',   r); break;
+      case 'TANK':   push('tank', r); break;
       case 'HEALER': push('healer', r); break;
-      case 'MELEE':  push('melee',  r); break;
+      case 'MELEE':  push('melee', r); break;
       case 'RANGED': push('ranged', r); break;
-      // MAYBE/ABSENT pomijamy w grafice rosteru
-      default: break;
     }
   }
   return grouped;
 }
 
 function isGrouped(x: any): x is SignupsGrouped {
-  return x && typeof x === 'object' && Array.isArray(x.tank) && Array.isArray(x.healer) && Array.isArray(x.melee) && Array.isArray(x.ranged);
+  return x && typeof x === 'object' && Array.isArray(x.tank);
 }
 
-/**
- * Buduje obraz rosteru.
- * - `signups` może być już zgrupowane (SignupsGrouped) lub surowa tablica (RawSignup[]).
- * - jeśli przekażesz `guildId`, spróbujemy dociągnąć class/spec z PlayerProfile.
- */
 export async function buildRosterImage(params: {
   title: string;
-  startAt: number;         // unix seconds
+  startAt: number;
   caps?: RaidCaps;
   signups: SignupsGrouped | RawSignup[];
   guildId?: string;
 }): Promise<{ attachment: AttachmentBuilder; filename: string }> {
   const { title, startAt, caps } = params;
-
-  // Ujednolicenie: zamień RawSignup[] -> SignupsGrouped (+ profile z DB)
   const signupsGrouped: SignupsGrouped = isGrouped(params.signups)
     ? params.signups
     : await groupRawSignups(params.signups as RawSignup[], params.guildId);
@@ -178,7 +163,6 @@ export async function buildRosterImage(params: {
   const gap = 16;
   const colW = Math.floor((W - P*2 - gap*(COLS.length-1)) / COLS.length);
   const rowH = 64, headerH = 72, subH = 28;
-
   const counts = {
     tank: signupsGrouped.tank.length,
     healer: signupsGrouped.healer.length,
@@ -191,11 +175,12 @@ export async function buildRosterImage(params: {
   const base = sharp({ create: { width: W, height: H, channels: 4, background: { r:2,g:6,b:23,alpha:1 } } }).png();
   const composites: sharp.OverlayOptions[] = [];
 
+  // nagłówek
   const titleSvg = Buffer.from(
     `<svg xmlns="http://www.w3.org/2000/svg" width="${W-P*2}" height="${headerH}">
       <style>
-        .tt{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,'Noto Sans',sans-serif;font-weight:700;fill:#E2E8F0;font-size:28px;}
-        .sd{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,'Noto Sans',sans-serif;font-weight:500;fill:#94A3B8;font-size:16px;}
+        .tt{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,'Noto Sans';font-weight:700;fill:#E2E8F0;font-size:26px;}
+        .sd{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,'Noto Sans';font-weight:500;fill:#94A3B8;font-size:16px;}
       </style>
       <text x="0" y="28" class="tt">${title.replace(/&/g,'&amp;')}</text>
       <text x="0" y="54" class="sd">&lt;t:${startAt}:F&gt;</text>
@@ -203,6 +188,7 @@ export async function buildRosterImage(params: {
   );
   composites.push({ input: titleSvg, top: P, left: P });
 
+  // kolumny
   const headers: Record<typeof COLS[number], string> = {
     tank:   `Tanks ${counts.tank}${caps?.tank?'/'+caps.tank:''}`,
     healer: `Healers ${counts.healer}${caps?.healer?'/'+caps.healer:''}`,
@@ -222,12 +208,12 @@ export async function buildRosterImage(params: {
       const top = startY + subH + i*rowH + 8;
 
       const iconBuf = await loadIconForProfile(entry.classKey, entry.specKey);
-      const icon = await sharp(iconBuf).resize(48,48).extend({ top:1,bottom:1,left:1,right:1,background:'#000' }).png().toBuffer();
+      const icon = await sharp(iconBuf).resize(48,48).png().toBuffer();
       composites.push({ input: icon, top, left });
 
       const color = CLASS_COLOR[entry.classKey || ''] || '#E5E7EB';
       const label = `${entry.displayName}${entry.specKey ? '  •  ' + prettySpec(entry.specKey) : ''}`;
-      composites.push({ input: svgText(label, colW-56, 48, color, 18), top: top+10, left: left+56 });
+      composites.push({ input: svgText(label, colW-56, 48, color, 18), top: top+16, left: left+56 });
     }
   }
 
