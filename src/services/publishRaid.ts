@@ -1,3 +1,4 @@
+// src/services/publishRaid.ts
 import {
   Guild,
   TextBasedChannel,
@@ -40,6 +41,7 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
   if (!fetched || !isText) throw new Error(`No access to text channel ${chId}`);
   const channel = fetched as TextBasedChannel;
 
+  // Compute timestamps (używane do info w embedzie i ewentualnie eventów)
   const nowSec = Math.floor(Date.now() / 1000);
   let startSec = Number(payload.startAt || (nowSec + FUTURE_LEEWAY_SEC));
   let endSec = payload.endAt != null ? Number(payload.endAt) : (startSec + DEFAULT_DURATION_SEC);
@@ -48,7 +50,7 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
 
   const isPast = startSec < (nowSec + FUTURE_LEEWAY_SEC);
 
-  // DB upsert
+  // DB upsert (status trzymamy w DB, domyślnie "CREATED")
   const raid = await prisma.raid.upsert({
     where: { raidId: payload.raidId },
     create: {
@@ -59,6 +61,7 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
       endAt: new Date(endSec * 1000),
       notes: payload.notes ?? '',
       channelId: chId,
+      // status: "CREATED" // jeśli masz default w schemacie, nie trzeba
     },
     update: {
       raidTitle: payload.raidTitle,
@@ -69,6 +72,10 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
       channelId: chId,
     },
   });
+
+  // <<< KLUCZOWE: tylko DB decyduje czy można się zapisać >>>
+  const raidStatus = (raid as any).status ?? 'CREATED'; // "CREATED" | "STARTED" | "ENDED"
+  const allowSignups = raidStatus === 'CREATED';
 
   // Embed + components
   const signupsFlat = await loadSignups(payload.raidId, guild);
@@ -86,8 +93,8 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
   );
   embed.setColor(getDifficultyColor(payload.difficulty));
 
-  const allowSignups = Math.floor(Date.now() / 1000) < startSec;
-const components = rowsForRaid(payload.raidId, { allowSignups });
+  // przekażemy flagę do generatora przycisków, żeby je wyłączyć, gdy nie wolno
+  const components = rowsForRaid(payload.raidId, { allowSignups });
 
   // Message create/update (no images/attachments)
   let messageId: string | null = raid.messageId ?? null;
@@ -98,7 +105,7 @@ const components = rowsForRaid(payload.raidId, { allowSignups });
       await msg.edit({
         embeds: [embed],
         components,
-        attachments: [], // ensure old attachments are cleared if existed
+        attachments: [], // czyści stare załączniki, jeśli były
       }).catch(() => {});
     } else {
       messageId = null;
@@ -112,11 +119,11 @@ const components = rowsForRaid(payload.raidId, { allowSignups });
     if (sent) messageId = sent.id;
   }
 
-  // Scheduled event (future only)
+  // Scheduled event: tylko gdy status=CREATED (i w przyszłości)
   let eventId: string | null = raid.scheduledEventId ?? null;
   const eventName = clampEventTitle(payload.raidTitle);
 
-  if (CREATE_EVENTS && !isPast) {
+  if (CREATE_EVENTS && raidStatus === 'CREATED' && !isPast) {
     try {
       if (eventId) {
         const ev = await guild.scheduledEvents.fetch(eventId).catch(() => null);
@@ -144,7 +151,7 @@ const components = rowsForRaid(payload.raidId, { allowSignups });
         if (ev) eventId = ev.id;
       }
     } catch {
-      // ignore permission errors / disabled events
+      // brak uprawnień / eventy wyłączone — ignorujemy
     }
   }
 
