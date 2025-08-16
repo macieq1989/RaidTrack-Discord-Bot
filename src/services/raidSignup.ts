@@ -5,6 +5,9 @@ import {
 } from 'discord.js';
 import { prisma } from '../util/prisma.js';
 import { classSpecEmoji } from './profileIcons.js';
+import { queueRosterRefresh } from './rosterRefresh.js';
+import type { PlayerEntry, SignupsGrouped } from './rosterImage.js';
+
 import {
   getPlayerProfile, upsertPlayerProfile, listClasses, listSpecs, isValidClassSpec,
 } from './playerProfile.js';
@@ -23,7 +26,6 @@ export function normalizeRole(role: string): RoleKey {
   return 'MAYBE';
 }
 
-
 // 1) wczytanie zapisów do embeda
 export async function loadSignups(raidId: string): Promise<Array<{ userId: string; username: string; role: RoleKey }>> {
   const rows = await prisma.signup.findMany({
@@ -37,6 +39,32 @@ export async function loadSignups(raidId: string): Promise<Array<{ userId: strin
   }));
 }
 
+/**
+ * Zamiana płaskiej listy na strukturę dla rendererka obrazka:
+ * { tank: PlayerEntry[], healer: PlayerEntry[], melee: PlayerEntry[], ranged: PlayerEntry[] }
+ * (klasa/spec są opcjonalne – jeśli masz w PlayerProfile, można je kiedyś dociągać tutaj).
+ */
+export function toGroupedSignups(
+  list: Array<{ userId: string; username: string; role: RoleKey; classKey?: string; specKey?: string; }>
+): SignupsGrouped {
+  const grouped: SignupsGrouped = { tank: [], healer: [], melee: [], ranged: [] };
+  for (const s of list) {
+    const entry: PlayerEntry = {
+      userId: s.userId,
+      displayName: s.username,
+      classKey: s.classKey,
+      specKey: s.specKey,
+    };
+    switch (s.role) {
+      case 'TANK':   grouped.tank.push(entry);   break;
+      case 'HEALER': grouped.healer.push(entry); break;
+      case 'MELEE':  grouped.melee.push(entry);  break;
+      case 'RANGED': grouped.ranged.push(entry); break;
+      default: /* MAYBE/ABSENT pomijamy w obrazku */ break;
+    }
+  }
+  return grouped;
+}
 
 // 2) budowa embeda (nagłówek + listy roli)
 export function buildSignupEmbed(
@@ -132,6 +160,9 @@ export async function handleSignupButton(i: ButtonInteraction, guild: Guild) {
 
     await upsertSignupWithProfile(i, guild, raidId, role, profile.classKey, profile.specKey);
     await refreshSignupMessage(guild, raidId);
+    // ⬇️ używamy Guild z argumentu, nie i.guild
+    await queueRosterRefresh(guild, raidId);
+
     return true;
   }
 
@@ -219,14 +250,12 @@ export async function refreshSignupMessage(guild: Guild, raidId: string) {
   if (!raid?.channelId || !raid?.messageId) return;
 
   const ch = await guild.channels.fetch(raid.channelId).catch(() => null);
-if (!ch || !(ch as any).isTextBased?.()) return;
-const channel = ch as any;
+  if (!ch || !(ch as any).isTextBased?.()) return;
+  const channel = ch as any;
 
-
-const startSec = Math.floor(raid.startAt.getTime() / 1000);
-const endDate  = raid.endAt ?? new Date(raid.startAt.getTime() + DEFAULT_DURATION_SEC * 1000);
-const endSec   = Math.floor(endDate.getTime() / 1000);
-
+  const startSec = Math.floor(raid.startAt.getTime() / 1000);
+  const endDate  = raid.endAt ?? new Date(raid.startAt.getTime() + DEFAULT_DURATION_SEC * 1000);
+  const endSec   = Math.floor(endDate.getTime() / 1000);
 
   const signups = await loadSignups(raidId);
   const embed = buildSignupEmbed(
@@ -239,7 +268,7 @@ const endSec   = Math.floor(endDate.getTime() / 1000);
       notes: raid.notes || undefined,
     },
     undefined,
-    signups as any
+    signups
   );
   const components = rowsForRaid(raidId);
 

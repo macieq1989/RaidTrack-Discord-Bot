@@ -6,12 +6,12 @@ import {
 import { cfg } from '../config.js';
 import { clampEventTitle, RaidPayload } from './mapping.js';
 import { prisma } from '../util/prisma.js';
-import { buildSignupEmbed, rowsForRaid, loadSignups } from './raidSignup.js';
+import { buildSignupEmbed, rowsForRaid, loadSignups, toGroupedSignups } from './raidSignup.js';
+import { buildRosterImage } from './rosterImage.js';
 
 const CREATE_EVENTS = String(process.env.RAID_CREATE_EVENTS ?? 'true') === 'true';
 const FUTURE_LEEWAY_SEC = Number(process.env.RAID_EVENT_LEEWAY_SEC ?? 300);
 const DEFAULT_DURATION_SEC = Number(process.env.RAID_EVENT_DEFAULT_DURATION_SEC ?? 3 * 3600);
-
 
 // Resolve channel based on difficulty
 function resolveChannelId(diff: string): string {
@@ -19,7 +19,6 @@ function resolveChannelId(diff: string): string {
   const map = cfg.channelRouting as Record<string, string>;
   return map[key] || cfg.fallbackChannel;
 }
-
 
 export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
   const chId = resolveChannelId(payload.difficulty);
@@ -30,8 +29,7 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
 
   const nowSec = Math.floor(Date.now() / 1000);
   let startSec = Number(payload.startAt || (nowSec + FUTURE_LEEWAY_SEC));
-  let endSec =
-    payload.endAt != null ? Number(payload.endAt) : (startSec + DEFAULT_DURATION_SEC);
+  let endSec = payload.endAt != null ? Number(payload.endAt) : (startSec + DEFAULT_DURATION_SEC);
   if (!Number.isFinite(startSec) || startSec <= 0) startSec = nowSec + FUTURE_LEEWAY_SEC;
   if (!Number.isFinite(endSec) || endSec <= startSec) endSec = startSec + DEFAULT_DURATION_SEC;
 
@@ -59,8 +57,8 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
     },
   });
 
-  // Build embed + components (role buttons + change role + caps)
-  const signups = await loadSignups(payload.raidId);
+  // Embed + komponenty
+  const signupsFlat = await loadSignups(payload.raidId);
   const embed = buildSignupEmbed(
     {
       raidId: payload.raidId,
@@ -71,9 +69,24 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
       notes: payload.notes,
     },
     payload.caps,
-    signups,
+    signupsFlat,
   );
   const components = rowsForRaid(payload.raidId);
+
+  // Obrazek rosteru — wymaga SignupsGrouped
+  let files: any[] = [];
+  try {
+    const { attachment, filename } = await buildRosterImage({
+      title: payload.raidTitle,
+      startAt: startSec,
+      caps: payload.caps,
+      signups: toGroupedSignups(signupsFlat),
+    });
+    embed.setImage(`attachment://${filename}`);
+    files = [attachment];
+  } catch {
+    // brak obrazka nie powinien blokować publikacji
+  }
 
   // Message create/update
   let messageId: string | null = raid.messageId ?? null;
@@ -81,13 +94,13 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
   if (messageId) {
     const msg = await (channel as any).messages?.fetch?.(messageId).catch(() => null);
     if (msg) {
-      await msg.edit({ embeds: [embed], components }).catch(() => {});
+      await msg.edit({ embeds: [embed], components, files }).catch(() => {});
     } else {
       messageId = null;
     }
   }
   if (!messageId) {
-    const sent = await (channel as any).send({ embeds: [embed], components }).catch(() => null);
+    const sent = await (channel as any).send({ embeds: [embed], components, files }).catch(() => null);
     if (sent) messageId = sent.id;
   }
 
@@ -123,11 +136,10 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
         if (ev) eventId = ev.id;
       }
     } catch {
-      // brak uprawnień albo wyłączone eventy na serwerze — pomijamy cicho
+      // brak uprawnień lub wyłączone eventy – ignorujemy
     }
   }
 
-  // persist resolved IDs
   await prisma.raid.update({
     where: { raidId: payload.raidId },
     data: { messageId, scheduledEventId: eventId },
