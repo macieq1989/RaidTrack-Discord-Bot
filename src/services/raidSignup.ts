@@ -1,4 +1,3 @@
-// src/services/raidSignup.ts
 import {
   ActionRowBuilder, ButtonBuilder, ButtonInteraction, ButtonStyle,
   StringSelectMenuBuilder, StringSelectMenuInteraction, EmbedBuilder, Guild,
@@ -7,11 +6,13 @@ import { prisma } from '../util/prisma.js';
 import { classSpecEmoji } from './profileIcons.js';
 import type { PlayerEntry, SignupsGrouped } from './rosterImage.js';
 import { cfg } from '../config.js';
+
 import {
   getPlayerProfile, upsertPlayerProfile, listClasses, listSpecs, isValidClassSpec,
 } from './playerProfile.js';
 
 export type RoleKey = 'TANK'|'HEALER'|'MELEE'|'RANGED'|'MAYBE'|'ABSENT';
+export type RaidStatus = 'CREATED'|'STARTED'|'ENDED';
 
 // ---------- normalizacja + emoji helpery ----------
 function normToken(s?: string) {
@@ -69,7 +70,7 @@ function ensureEmojiToken(maybe: string, cls?: string, spec?: string): string {
   return maybe;
 }
 
-// ---------- stałe / kolor trudności / status ----------
+// ---------- stałe / kolor trudności ----------
 const DEFAULT_DURATION_SEC = Number(process.env.RAID_EVENT_DEFAULT_DURATION_SEC ?? 3 * 3600);
 
 function getDifficultyColor(diffRaw?: string) {
@@ -91,7 +92,6 @@ export function normalizeRole(role: string): RoleKey {
   return 'MAYBE';
 }
 
-// ---------- load signups ----------
 /**
  * Wczytuje zapisy + (opcjonalnie) profil i serwerowe wyświetlane nazwy.
  * Dodatkowo zwraca createdAtSec do liczenia kolejności.
@@ -172,6 +172,7 @@ export function toGroupedSignups(
 }
 
 // ---------- EMBED ----------
+
 const ROLE_ICONS: Record<RoleKey,string> = {
   TANK:   '🛡️',
   HEALER: '✨',
@@ -181,19 +182,16 @@ const ROLE_ICONS: Record<RoleKey,string> = {
   ABSENT: '🚫',
 };
 
-type Meta = {
-  raidId: string;
-  raidTitle: string;
-  difficulty: string;
-  startAt: number;
-  endAt: number;
-  notes?: string;
-  /** OPCJONALNIE: status z DB (CREATED|STARTED|ENDED). Jeśli brak, policzymy z czasu. */
-  status?: string;
-};
-
 export function buildSignupEmbed(
-  meta: Meta,
+  meta: {
+    raidId: string;
+    raidTitle: string;
+    difficulty: string;
+    startAt: number;
+    endAt: number;
+    notes?: string;
+    status: RaidStatus; // <-- status z DB
+  },
   caps: { tank?: number; healer?: number; melee?: number; ranged?: number } | undefined,
   signups: Array<{ userId: string; username: string; role: RoleKey; classKey?: string; specKey?: string; createdAtSec?: number }>
 ) {
@@ -201,16 +199,6 @@ export function buildSignupEmbed(
     TANK: [], HEALER: [], MELEE: [], RANGED: [], MAYBE: [], ABSENT: [],
   };
   for (const s of signups) groups[s.role]?.push(s);
-
-  // Status preferencyjnie z DB; fallback: z czasu
-  let statusText = (meta.status ?? '').toString().toUpperCase();
-  if (statusText !== 'CREATED' && statusText !== 'STARTED' && statusText !== 'ENDED') {
-    const now = Math.floor(Date.now() / 1000);
-    statusText =
-      now < meta.startAt ? 'CREATED' :
-      now >= meta.startAt && now < meta.endAt ? 'STARTED' :
-      'ENDED';
-  }
 
   const committed = groups.TANK.length + groups.HEALER.length + groups.MELEE.length + groups.RANGED.length;
   const maybes = groups.MAYBE.length;
@@ -241,13 +229,11 @@ export function buildSignupEmbed(
   };
 
   const embed = new EmbedBuilder()
-    .setTitle(`${meta.raidTitle.toUpperCase()} (${statusText.toLowerCase()})`)
-    .setDescription(
-      [cleanNotes, `👥 **${committed}+${maybes}**`].filter(Boolean).join('\n')
-    )
+    .setTitle(`${meta.raidTitle.toUpperCase()} (${meta.status.toLowerCase()})`)
+    .setDescription([cleanNotes, `👥 **${committed}+${maybes}**`].filter(Boolean).join('\n'))
     .addFields(
       { name: 'Difficulty', value: meta.difficulty || '—', inline: true },
-      { name: 'Start', value: `<t:${meta.startAt}:f>\n(<t:${meta.startAt}:R>)`, inline: true }, // bez dnia tygodnia
+      { name: 'Start', value: `<t:${meta.startAt}:f>\n(<t:${meta.startAt}:R>)`, inline: true },
       { name: 'End',   value: `<t:${meta.endAt}:t>`, inline: true },
       { name: '\u200B', value: '\u200B' },
     )
@@ -274,6 +260,7 @@ export function buildSignupEmbed(
 }
 
 // ---------- BUTTONS / ROWY ----------
+
 export function roleButtonsRow(raidId: string, disabled = false): ActionRowBuilder<ButtonBuilder> {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId(`signup:role:${raidId}:TANK`).setLabel('Tank').setStyle(ButtonStyle.Primary).setDisabled(disabled),
@@ -285,7 +272,6 @@ export function roleButtonsRow(raidId: string, disabled = false): ActionRowBuild
 }
 
 export function changeRoleRow(raidId: string, disableSignups = false): ActionRowBuilder<ButtonBuilder> {
-  // „Change role” usunięty wcześniej; Leave blokujemy, gdy zapisy zamknięte
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId(`profile:change:${raidId}`).setLabel('Change class/spec').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`signup:role:${raidId}:ABSENT`).setLabel('Leave').setStyle(ButtonStyle.Danger).setDisabled(disableSignups),
@@ -298,6 +284,7 @@ export function rowsForRaid(raidId: string, opts?: { allowSignups?: boolean }) {
 }
 
 // ---------- INTERAKCJE ----------
+
 export async function handleSignupButton(i: ButtonInteraction, guild: Guild) {
   if (!i.customId.startsWith('signup:') && !i.customId.startsWith('profile:change:')) return false;
 
@@ -329,11 +316,10 @@ export async function handleSignupButton(i: ButtonInteraction, guild: Guild) {
       return true;
     }
 
-    // twarda blokada wg statusu z DB
+    // BLOKADA po statusie z DB (nie po czasie!)
     const raid = await prisma.raid.findUnique({ where: { raidId } });
     if (!raid) { await i.reply({ content: 'Raid not found.', ephemeral: true }); return true; }
-    const status = ((raid as any).status ?? 'CREATED').toUpperCase();
-    if (status !== 'CREATED') {
+    if ((raid as any).status !== 'CREATED') {
       await i.reply({ content: 'Signups are closed for this raid.', ephemeral: true });
       return true;
     }
@@ -391,6 +377,7 @@ export async function handleProfileSelect(i: StringSelectMenuInteraction, guild:
 }
 
 // ---------- Helpers ----------
+
 function classSelectRow(raidId: string, forRole: RoleKey) {
   const classes = listClasses();
   const menu = new StringSelectMenuBuilder()
@@ -441,9 +428,7 @@ export async function refreshSignupMessage(guild: Guild, raidId: string) {
   const startSec = Math.floor(raid.startAt.getTime() / 1000);
   const endDate  = raid.endAt ?? new Date(raid.startAt.getTime() + DEFAULT_DURATION_SEC * 1000);
   const endSec   = Math.floor(endDate.getTime() / 1000);
-  const status   = ((raid as any).status ?? 'CREATED').toString().toUpperCase();
 
-  // przekaż Guild — dostaniemy displayName'y
   const signups = await loadSignups(raidId, guild);
 
   const embed = buildSignupEmbed(
@@ -454,7 +439,7 @@ export async function refreshSignupMessage(guild: Guild, raidId: string) {
       startAt: startSec,
       endAt: endSec,
       notes: raid.notes || undefined,
-      status, // <-- status z DB do tytułu
+      status: (raid as any).status as RaidStatus, // <-- status z DB
     },
     undefined,
     signups
@@ -464,9 +449,8 @@ export async function refreshSignupMessage(guild: Guild, raidId: string) {
   // @ts-ignore
   embed.setImage?.(null);
 
-  // przyciski wg statusu z DB
-  const allow = status === 'CREATED';
-  const components = rowsForRaid(raidId, { allowSignups: allow });
+  const allowSignups = (raid as any).status === 'CREATED';
+  const components = rowsForRaid(raidId, { allowSignups });
 
   const msg = await (ch as any).messages?.fetch?.(raid.messageId).catch(() => null);
   if (msg) {
