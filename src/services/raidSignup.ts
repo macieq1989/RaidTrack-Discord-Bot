@@ -262,7 +262,13 @@ export function buildSignupEmbed(
       { name: `⚔️ Melee (${groups.MELEE.length}${caps?.melee ? `/${caps.melee}` : ''})`, value: fmtPlayers(groups.MELEE, 'MELEE'), inline: true },
     )
     // SPACER między pierwszym wierszem ról a drugim (Tank/Healer/Melee vs Ranged/Maybe/Absent)
-    .addFields({ name: '\u200B', value: '\u200B' })
+    // mniejszy odstęp – jeden „wiersz” z trzema pustymi polami inline
+.addFields(
+  { name: '\u200B', value: '\u200B', inline: true },
+  { name: '\u200B', value: '\u200B', inline: true },
+  { name: '\u200B', value: '\u200B', inline: true },
+)
+
     .addFields(
       { name: `🏹 Ranged (${groups.RANGED.length}${caps?.ranged ? `/${caps.ranged}` : ''})`, value: fmtPlayers(groups.RANGED, 'RANGED'), inline: true },
       { name: `❔ Maybe (${groups.MAYBE.length})`, value: fmtPlayers(groups.MAYBE, 'MAYBE'), inline: true },
