@@ -9,35 +9,37 @@ datasource db {
 }
 
 model Raid {
-  raidId           String    @id
+  raidId           String   @id
   raidTitle        String
   difficulty       String
   startAt          DateTime
   endAt            DateTime?
   notes            String?
   channelId        String
-  messageId        String?   @unique
-  scheduledEventId String?   @unique
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  messageId        String?  @unique
+  scheduledEventId String?  @unique
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  // zamiast enuma:
+  status           String   @default("CREATED") // "CREATED" | "STARTED" | "ENDED"
 
   @@map("Raid")
   @@index([startAt])
   @@index([channelId])
 }
 
-
 model Signup {
   id        String   @id @default(cuid())
   raidId    String
   userId    String
   username  String
-  role      String   // TANK | HEALER | MELEE | RANGED | MAYBE | ABSENT
+  role      String
   status    String   @default("JOINED")
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([raidId, userId])  // pozwala na upsert po (raidId,userId)
+  @@unique([raidId, userId])
   @@index([raidId])
   @@map("Signup")
 }
@@ -46,10 +48,10 @@ model PlayerProfile {
   id        String   @id @default(cuid())
   guildId   String
   userId    String
-  classKey  String    // e.g. PALADIN
-  specKey   String    // e.g. RETRIBUTION
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
+  classKey  String
+  specKey   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([guildId, userId])
 }

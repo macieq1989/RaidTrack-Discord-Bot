@@ -255,6 +255,12 @@ function mapLuaRaidToIngest(raid: Record<string, any>) {
       ? Number(raid.ended)
       : (startAt ? startAt + DEFAULT_DURATION_SEC : undefined);
 
+  // normalize status if present
+  const statusRaw = typeof raid.status === 'string' ? raid.status.trim().toUpperCase() : undefined;
+  const status = (statusRaw === 'CREATED' || statusRaw === 'STARTED' || statusRaw === 'ENDED')
+    ? statusRaw
+    : undefined;
+
   const notesParts: string[] = [];
   if (raid.status) notesParts.push(`status:${raid.status}`);
   if (raid.scheduledDate) notesParts.push(`date:${raid.scheduledDate}`);
@@ -262,7 +268,7 @@ function mapLuaRaidToIngest(raid: Record<string, any>) {
   if (raid.ended) notesParts.push(`ended:${raid.ended}`);
   const notes = notesParts.join(' | ') || undefined;
 
-  return { raidId, raidTitle, difficulty, startAt, endAt, notes };
+  return { raidId, raidTitle, difficulty, startAt, endAt, notes, status };
 }
 
 export function startSavedVariablesPoller(
@@ -314,7 +320,6 @@ export function startSavedVariablesPoller(
       const m = extractRaidPresetsConfig(text);
       if (Object.keys(m).length) {
         lastPresetConfigMap = m;
-        // console.log('[SV] raidPresets parsed:', Object.keys(m).length);
       }
     } catch {
       // non-fatal
@@ -326,20 +331,26 @@ export function startSavedVariablesPoller(
       if (json) {
         status.mode = 'json';
         let count = 0;
+
+        const handleOne = async (packet: any) => {
+          if (!packet?.guildId || !packet?.raid) return;
+          const guild: Guild = await client.guilds.fetch(String(packet.guildId));
+
+          // Normalizacja minimalna JSON -> zapewnij endAt (jak brak)
+          const r = packet.raid;
+          if (!r.endAt && r.startAt) r.endAt = Number(r.startAt) + DEFAULT_DURATION_SEC;
+          // (status — jeśli jest w JSON — przechodzi dalej; publishRaid nie zapisuje go do DB)
+
+          await publishOrUpdateRaid(guild, r);
+          count++;
+        };
+
         if (Array.isArray(json)) {
-          for (const item of json) {
-            if (!item?.guildId || !item?.raid) continue;
-            const guild: Guild = await client.guilds.fetch(String(item.guildId));
-            await publishOrUpdateRaid(guild, item.raid as any);
-            count++;
-          }
-        } else if (json?.guildId && json?.raid) {
-          const guild: Guild = await client.guilds.fetch(String(json.guildId));
-          await publishOrUpdateRaid(guild, json.raid as any);
-          count = 1;
+          for (const item of json) await handleOne(item);
         } else {
-          throw new Error('Unsupported JSON shape; expected {guildId, raid} or an array.');
+          await handleOne(json);
         }
+
         status.lastProcessedCount = count;
         return;
       }
