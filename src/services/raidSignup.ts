@@ -207,38 +207,73 @@ export function buildSignupEmbed(
   };
   for (const s of signups) groups[s.role]?.push(s);
 
+  // status obok tytułu (na podstawie czasu)
+  const now = Math.floor(Date.now() / 1000);
+  const status =
+    now < meta.startAt ? 'created' :
+    now >= meta.startAt && now < meta.endAt ? 'started' :
+    'ended';
+
   // licznik: committed + maybes
   const committed = groups.TANK.length + groups.HEALER.length + groups.MELEE.length + groups.RANGED.length;
   const maybes = groups.MAYBE.length;
 
-  const descParts: string[] = [];
-  if (meta.notes) descParts.push(meta.notes);
-  descParts.push(`👥 **${committed}+${maybes}**`);
+  // notes bez linii zaczynającej się od "status:" (jeśli przychodzi z importu)
+  const cleanNotes = (meta.notes || '').replace(/^\s*status:.*$/gmi, '').trim();
+
+  // mapowanie: userId -> globalny numer zapisu (1..N wg createdAt)
+  const ordered = [...signups]
+    .sort((a, b) => (a.createdAtSec ?? 0) - (b.createdAtSec ?? 0))
+    .map((s, idx) => [s.userId, idx + 1]) as Array<[string, number]>;
+  const orderMap = new Map<string, number>(ordered);
+
+  const HEADER_LINE = '────────────';
+
+  // renderer linii graczy (z numerkiem #)
+  const fmtPlayers = (arr: typeof signups, role: RoleKey) => {
+    if (!arr.length) return '—';
+    return [HEADER_LINE, ...arr.map(p => {
+      // emoji klasy/spec
+      let icon = '•';
+      if (p.classKey && p.specKey) {
+        const raw = classSpecEmoji(p.classKey, p.specKey, role);
+        icon = ensureEmojiToken(raw, p.classKey, p.specKey);
+      }
+      const idx = orderMap.get(p.userId);
+      const pos = typeof idx === 'number' ? `  #${idx}` : '';
+      return `${icon} ${p.username}${pos}`;
+    })].join('\n');
+  };
 
   const embed = new EmbedBuilder()
-    .setTitle(meta.raidTitle.toUpperCase())
-    .setDescription(descParts.join('\n'))
+    .setTitle(`${meta.raidTitle.toUpperCase()} (${status})`)
+    .setDescription(
+      [cleanNotes, `👥 **${committed}+${maybes}**`].filter(Boolean).join('\n')
+    )
     .addFields(
+      // Start bez dnia tygodnia: <t:...:f> i przeniesione "relative" pod spód
       { name: 'Difficulty', value: meta.difficulty || '—', inline: true },
-      { name: 'Start', value: `<t:${meta.startAt}:F>\n(<t:${meta.startAt}:R>)`, inline: true },
+      { name: 'Start', value: `<t:${meta.startAt}:f>\n(<t:${meta.startAt}:R>)`, inline: true },
       { name: 'End',   value: `<t:${meta.endAt}:t>`, inline: true },
-      { name: '\u200B', value: '\u200B' }, // odstęp
+      // odstęp między metadanymi a kolumnami ról
+      { name: '\u200B', value: '\u200B' },
     )
     .addFields(
-      { name: `${ROLE_ICONS.TANK} Tank (${groups.TANK.length}${caps?.tank ? `/${caps.tank}` : ''})`, value: fmtPlayers(groups.TANK.map(u => ({...u, role: 'TANK'}))), inline: true },
-      { name: `${ROLE_ICONS.HEALER} Healer (${groups.HEALER.length}${caps?.healer ? `/${caps.healer}` : ''})`, value: fmtPlayers(groups.HEALER.map(u => ({...u, role: 'HEALER'}))), inline: true },
-      { name: `${ROLE_ICONS.MELEE} Melee (${groups.MELEE.length}${caps?.melee ? `/${caps.melee}` : ''})`, value: fmtPlayers(groups.MELEE.map(u => ({...u, role: 'MELEE'}))), inline: true },
+      { name: `🛡️ Tank (${groups.TANK.length}${caps?.tank ? `/${caps.tank}` : ''})`, value: fmtPlayers(groups.TANK, 'TANK'), inline: true },
+      { name: `✨ Healer (${groups.HEALER.length}${caps?.healer ? `/${caps.healer}` : ''})`, value: fmtPlayers(groups.HEALER, 'HEALER'), inline: true },
+      { name: `⚔️ Melee (${groups.MELEE.length}${caps?.melee ? `/${caps.melee}` : ''})`, value: fmtPlayers(groups.MELEE, 'MELEE'), inline: true },
     )
     .addFields(
-      { name: `${ROLE_ICONS.RANGED} Ranged (${groups.RANGED.length}${caps?.ranged ? `/${caps.ranged}` : ''})`, value: fmtPlayers(groups.RANGED.map(u => ({...u, role: 'RANGED'}))), inline: true },
-      { name: `${ROLE_ICONS.MAYBE} Maybe (${groups.MAYBE.length})`, value: fmtPlayers(groups.MAYBE.map(u => ({...u, role: 'MAYBE'}))), inline: true },
-      { name: `${ROLE_ICONS.ABSENT} Absent (${groups.ABSENT.length})`, value: fmtPlayers(groups.ABSENT.map(u => ({...u, role: 'ABSENT'}))), inline: true },
+      { name: `🏹 Ranged (${groups.RANGED.length}${caps?.ranged ? `/${caps.ranged}` : ''})`, value: fmtPlayers(groups.RANGED, 'RANGED'), inline: true },
+      { name: `❔ Maybe (${groups.MAYBE.length})`, value: fmtPlayers(groups.MAYBE, 'MAYBE'), inline: true },
+      { name: `🚫 Absent (${groups.ABSENT.length})`, value: fmtPlayers(groups.ABSENT, 'ABSENT'), inline: true },
     )
     .setFooter({ text: `RaidID: ${meta.raidId}` })
     .setColor(getDifficultyColor(meta.difficulty));
 
   return embed;
 }
+
 
 // ---------- BUTTONS / ROWY ----------
 
