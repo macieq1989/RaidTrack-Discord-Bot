@@ -8,11 +8,14 @@ import {
 } from 'discord.js';
 import { cfg } from './config.js';
 import { createWebServer } from './web.js';
+
+// --- commands ---
 import * as RtImport from './commands/rt-import.js';
+import * as SendEmoji from './commands/sendEmoji.js'; // <— NOWE
+
 import webRoutes from './routes/web.js'; // keep .js extension with NodeNext/ESM
 import { startSavedVariablesPoller } from './services/svPoller.js';
 import { handleSignupButton, handleProfileSelect } from './services/raidSignup.js';
-
 
 console.log('[RT] allowExternalEmoji =', cfg.allowExternalEmoji);
 console.log('[RT] emoji map keys     =', Object.keys(cfg.customEmoji));
@@ -29,20 +32,28 @@ const client = new Client({
     Partials.GuildMember,
     Partials.Channel,
     Partials.Message,
-    Partials.GuildScheduledEvent, // ok even if not strictly needed
+    Partials.GuildScheduledEvent,
   ],
 });
 
 // === command module type ===
 type CommandModule = {
-  data: { toJSON: () => RESTPostAPIChatInputApplicationCommandsJSONBody };
+  data: { toJSON: () => RESTPostAPIChatInputApplicationCommandsJSONBody; name?: string };
   execute: (i: ChatInputCommandInteraction) => Promise<unknown>;
 };
 
+// --- collect commands here ---
+const modules: Record<string, CommandModule> = {
+  rt: RtImport as unknown as CommandModule,
+  'send-emoji': SendEmoji as unknown as CommandModule, // <— NOWE
+};
+
 // register + router
-const commands: RESTPostAPIChatInputApplicationCommandsJSONBody[] = [RtImport.data.toJSON()];
+const commands: RESTPostAPIChatInputApplicationCommandsJSONBody[] =
+  Object.values(modules).map(m => m.data.toJSON());
+
 const router = new Collection<string, CommandModule>();
-router.set('rt', RtImport as unknown as CommandModule);
+for (const [name, mod] of Object.entries(modules)) router.set(name, mod);
 
 let app: ReturnType<typeof createWebServer> | null = null;
 
