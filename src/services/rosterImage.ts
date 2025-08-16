@@ -43,29 +43,21 @@ function localIconCandidates(cls?: string, spec?: string) {
 }
 
 async function loadIconForProfile(cls?: string, spec?: string): Promise<Buffer> {
-  // 1) pełna ikona class+spec
+  // 1) spróbuj znaleźć lokalny plik class+spec
   for (const p of localIconCandidates(cls, spec)) {
     if (await fileExists(p)) return fs.readFile(p);
   }
-  // 2) fallback: sama klasa
+  // 2) fallback: sama klasa (np. rt_paladin.png)
   if (cls) {
     const alt = path.join(ASSET_ICON_DIR, `rt_${cls.toLowerCase()}.png`);
     if (await fileExists(alt)) return fs.readFile(alt);
   }
-  // 3) online znak zapytania
-  if (!ICON_OFFLINE_ONLY) {
-    const url = `https://wow.zamimg.com/images/wow/icons/large/inv_misc_questionmark.jpg`;
-    const res = await fetch(url as any).catch(() => null);
-    if (res?.ok) {
-      const buf = Buffer.from(await res.arrayBuffer());
-      return sharp(buf).resize(48, 48).png().toBuffer();
-    }
-  }
-  // 4) przezroczysta placeholder
+  // 3) zawsze wracamy pustą (przezroczystą) ikonkę
   return sharp({
-    create: { width: 48, height: 48, channels: 4, background: { r:0,g:0,b:0,alpha:0 } }
+    create: { width: 48, height: 48, channels: 4, background: { r:0, g:0, b:0, alpha:0 } }
   }).png().toBuffer();
 }
+
 
 const CLASS_COLOR: Record<string, string> = {
   warrior: '#C79C6E',
