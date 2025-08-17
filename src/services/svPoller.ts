@@ -6,6 +6,8 @@ import { cfg } from '../config.js';
 import { deriveDifficultyFromPresetConfig } from './mapping.js';
 import { publishEPGPBoard } from './epgpBoard.js';
 import { publishLootBatch } from "./publishLoot.js";
+import { makeLootKey, filterNewLootKeys, saveLootKeys } from "./lootDedupe.js";
+
 
 // ---------- tiny logger ----------
 const dbg = (...args: any[]) => console.log('[SV]', ...args);
@@ -410,17 +412,16 @@ export function startSavedVariablesPoller(
 async function maybePublishLootArray(arr: any[]) {
   if (!Array.isArray(arr) || arr.length === 0) return 0;
 
-  // filter only new entries (by timestamp first, fallback to id)
+  // 1) Wstępny filtr w pamięci (ts > lastLootMaxTs, albo id > lastLootMaxId)
   const fresh = arr.filter((e) => {
     const ts = Number(e?.timestamp ?? 0);
     const id = Number(e?.id ?? 0);
     if (Number.isFinite(ts) && ts > 0) return ts > lastLootMaxTs;
     return Number.isFinite(id) && id > lastLootMaxId;
   });
-
   if (!fresh.length) return 0;
 
-  // sort ascending by timestamp/id to post in order
+  // 2) Sort chronologiczny
   fresh.sort((a, b) => {
     const ta = Number(a?.timestamp ?? 0);
     const tb = Number(b?.timestamp ?? 0);
@@ -430,44 +431,73 @@ async function maybePublishLootArray(arr: any[]) {
     return ia - ib;
   });
 
-  // anti-spam: cap per tick
-  const MAX_PER_TICK = Number(process.env.LOOT_MAX_PER_TICK ?? 12);
-  const batchSrc = fresh.slice(0, Math.max(1, MAX_PER_TICK));
+  // 3) Zbuduj deterministyczne klucze do dedupe w DB
+  const keys = fresh.map((loot) => {
+    // wyciągamy itemId z item-stringa (np. ...|Hitem:194308:...|)
+    const itemStr = String(loot?.item ?? "");
+    const idMatch = itemStr.match(/Hitem:(\d+)/i);
+    const itemId = idMatch ? idMatch[1] : undefined;
+    return makeLootKey({
+      timestamp: Number(loot?.timestamp ?? 0) || undefined,
+      id: Number(loot?.id ?? 0) || undefined,
+      time: String(loot?.time ?? "") || undefined,
+      player: String(loot?.player ?? loot?.username ?? ""),
+      itemId,
+      gp: Number(loot?.gp ?? 0),
+      boss: String(loot?.boss ?? ""),
+    });
+  });
 
-  // map to LootEntry[]
+  // 4) Odfiltruj to, co już kiedyś wysłaliśmy (trwale)
+  const newKeys = await filterNewLootKeys(keys);
+  const newFresh = fresh.filter((_, i) => newKeys.includes(keys[i]));
+  if (!newFresh.length) return 0;
+
+  // 5) Anti-spam limit na tick
+  const MAX_PER_TICK = Number(process.env.LOOT_MAX_PER_TICK ?? 12);
+  const batchSrc = newFresh.slice(0, Math.max(1, MAX_PER_TICK));
+
+  // 6) Map do LootEntry[] dla publishLootBatch
   const batch = batchSrc.map((loot) => ({
     id: Number(loot?.id ?? 0),
-    player: String(loot?.player ?? loot?.username ?? 'Unknown'),
-    item: String(loot?.item ?? ''),
-    boss: String(loot?.boss ?? ''),
+    player: String(loot?.player ?? loot?.username ?? "Unknown"),
+    item: String(loot?.item ?? ""),
+    boss: String(loot?.boss ?? ""),
     gp: Number(loot?.gp ?? 0),
-    time: String(loot?.time ?? ''),
+    time: String(loot?.time ?? ""),
     timestamp: Number(loot?.timestamp ?? 0),
   }));
 
   try {
+    // 7) Publikacja batcha
     await publishLootBatch(client, batch);
 
-    // update high-water marks AFTER successful publish
+    // 8) Po sukcesie: zapisz klucze do DB (idempotentnie)
+    const keysToSave = batchSrc.map((_, i) => newKeys[i]); // 1:1 z batchSrc kolejnością
+    await saveLootKeys(keysToSave.filter(Boolean) as string[]);
+
+    // 9) Zaktualizuj high-water-mark pamięciowy (drugi bezpiecznik)
     for (const loot of batchSrc) {
       const ts = Number(loot?.timestamp ?? 0);
       const id = Number(loot?.id ?? 0);
       if (Number.isFinite(ts) && ts > lastLootMaxTs) lastLootMaxTs = ts;
-      if (Number.isFinite(id) && id > lastLootMaxId) lastLootMaxId = id;
+      // jeżeli ts równe, to rozstrzygaj po id
+      if (ts === lastLootMaxTs && Number.isFinite(id) && id > lastLootMaxId) lastLootMaxId = id;
+      if (!Number.isFinite(ts) && Number.isFinite(id) && id > lastLootMaxId) lastLootMaxId = id;
     }
 
-    const skipped = fresh.length - batchSrc.length;
+    const skipped = newFresh.length - batchSrc.length;
     dbg(
-      `loot: published ${batchSrc.length} entr${batchSrc.length === 1 ? 'y' : 'ies'}`
-      + (skipped > 0 ? ` (+${skipped} pending next tick)` : '')
+      `loot: published ${batchSrc.length} entr${batchSrc.length === 1 ? "y" : "ies"}`
+        + (skipped > 0 ? ` (+${skipped} pending next tick)` : "")
     );
-
     return batchSrc.length;
   } catch (e: any) {
-    console.warn('[SV] loot batch publish failed:', e?.message ?? e);
+    console.warn("[SV] loot batch publish failed:", e?.message ?? e);
     return 0;
   }
 }
+
 
 
   async function tick() {
