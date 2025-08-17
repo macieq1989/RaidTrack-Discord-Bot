@@ -297,16 +297,16 @@ function extractEPGPFromLua(content: string): {
 } {
   const out: Array<{ username: string; ep: number; gp: number; userId?: string }> = [];
 
-  // boardId = epgpWipeID (optional)
+  // boardId = epgpWipeID (opcjonalnie)
   const wipeM = /(?:\[\s*["']epgpWipeID["']\s*\]|\bepgpWipeID\b)\s*=\s*([0-9]+)/i.exec(content);
   const boardId = wipeM ? wipeM[1] : undefined;
 
-  // find epgp = { ... } or ["epgp"] = { ... }
+  // epgp = { ... } lub ["epgp"] = { ... }
   const rootRe = /(?:\[\s*["']epgp["']\s*\]|\bepgp\b)\s*=\s*{/i;
   const m = rootRe.exec(content);
   if (!m) return { entries: out, boardId };
 
-  // isolate inner block of epgp { ... }
+  // wytnij blok epgp { ... }
   let i = (m.index ?? 0) + m[0].length;
   let depth = 1, end = i;
   for (; end < content.length; end++) {
@@ -316,14 +316,14 @@ function extractEPGPFromLua(content: string): {
   }
   const block = content.slice(i, end - 1);
 
-  // iterate ["Name"] = { ... }
+  // iteruj ["Name"] = { ... }
   const entryRe = /\[\s*"([^"]+)"\s*\]\s*=\s*{/g;
   let em: RegExpExecArray | null;
   while ((em = entryRe.exec(block)) !== null) {
     const name = em[1];
     let j = em.index + em[0].length;
 
-    // balance inner table
+    // balans wewnętrznej tabeli
     let d = 1, k = j;
     for (; k < block.length; k++) {
       const ch2 = block[k];
@@ -332,13 +332,14 @@ function extractEPGPFromLua(content: string): {
     }
     const inner = block.slice(j, k - 1);
 
-    // read ep/gp (case-insensitive), optional discordId/userId
-    const epm = /(?:\bEP\b|\bep\b)\s*=\s*([0-9]+(?:\.[0-9]+)?)/.exec(inner);
-    const gpm = /(?:\bGP\b|\bgp\b)\s*=\s*([0-9]+(?:\.[0-9]+)?)/.exec(inner);
-    const um  = /(?:\[\s*["']discordId["']\s*\]|\bdiscordId\b|\buserId\b)\s*=\s*"([^"]+)"/.exec(inner);
+    // UWAGA: obsługa ["ep"] = 124 / ["gp"] = 1 i wariantów bez nawiasów
+    const epm = /(?:\[\s*["']ep["']\s*\]|\bep\b)\s*=\s*([0-9]+(?:\.[0-9]+)?)/i.exec(inner);
+    const gpm = /(?:\[\s*["']gp["']\s*\]|\bgp\b)\s*=\s*([0-9]+(?:\.[0-9]+)?)/i.exec(inner);
+    const um  = /(?:\[\s*["']discordId["']\s*\]|\bdiscordId\b|\buserId\b)\s*=\s*"([^"]+)"/i.exec(inner);
 
     const ep = epm ? Number(epm[1]) : NaN;
     const gp = gpm ? Number(gpm[1]) : NaN;
+
     if (Number.isFinite(ep) && Number.isFinite(gp)) {
       out.push({ username: name, ep, gp, userId: um?.[1] });
     }
@@ -348,6 +349,7 @@ function extractEPGPFromLua(content: string): {
 
   return { entries: out, boardId };
 }
+
 
 // ---------- Poller ----------
 export function startSavedVariablesPoller(
@@ -564,7 +566,7 @@ export function startSavedVariablesPoller(
 
   const timer = setInterval(tick, intervalMs);
   // initial run
-  tick().catch(() => {});
+  tick().catch(() => { });
   return { stop() { clearInterval(timer); } };
 }
 
