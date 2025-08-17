@@ -386,57 +386,53 @@ async function upsertSignupWithProfile(
     update: { role },
   });
 
-  // 2) Auto "Interested" on event iff role != ABSENT and event is active/upcoming
-  let interestedOk = true; // default optimistic
+  // 2) Auto "Interested" on event
+  const shouldBeInterested = role !== 'ABSENT';
+  let interestedOk = true;
+
   try {
     const raid = await prisma.raid.findUnique({
       where: { raidId },
       select: { scheduledEventId: true },
     });
+    const hasEvent = !!raid?.scheduledEventId;
 
-    const shouldBeInterested = role !== 'ABSENT';
-    const eventId = raid?.scheduledEventId ?? null;
-
-    if (eventId && shouldBeInterested) {
-      // fetch event to ensure it's not Completed/Canceled
-      const ev = await guild.scheduledEvents.fetch(eventId).catch(() => null);
-      const canMark =
-        !!ev &&
-        ev.status !== GuildScheduledEventStatus.Completed &&
-        ev.status !== GuildScheduledEventStatus.Canceled;
-
-      if (canMark) {
-        // one try + quick retry (Discord can lag a bit)
-        interestedOk = await setEventInterestByRaidId(guild, raidId, i.user.id, true);
+    if (hasEvent) {
+      if (shouldBeInterested) {
+        // first attempt
+        interestedOk = await setEventInterestByRaidId(guild, raidId, i.user.id, true).catch(() => false);
         if (!interestedOk) {
-          await sleep(500);
-          interestedOk = await setEventInterestByRaidId(guild, raidId, i.user.id, true);
+          // one retry after 3s (Discord can lag right after event creation)
+          setTimeout(() => {
+            setEventInterestByRaidId(guild, raidId, i.user.id, true).catch(() => {});
+          }, 3000);
         }
       } else {
-        // event not suitable for interest
-        interestedOk = false;
+        // remove Interested when leaving
+        await setEventInterestByRaidId(guild, raidId, i.user.id, false).catch(() => {});
       }
-    } else if (eventId && !shouldBeInterested) {
-      // remove Interested when ABSENT
-      await setEventInterestByRaidId(guild, raidId, i.user.id, false).catch(() => {});
+    } else {
+      // no event linked to this raid -> don't warn user
+      interestedOk = true;
     }
   } catch (err) {
     console.warn('[events] interested flow error:', (err as any)?.message ?? err);
     interestedOk = false;
   }
 
-  // 3) Feedback for user
+  // 3) User feedback
   const emoji = (classKey && specKey) ? classSpecEmoji(classKey, specKey, role) : '✅';
   await i.reply({
     content:
       `${emoji} Saved: **${role}** for **${i.user.username}**` +
       (classKey && specKey ? ` (${classKey}/${specKey}).` : '.') +
       (!interestedOk && role !== 'ABSENT'
-        ? `\n⚠️ Nie udało się oznaczyć Cię jako *Interested* na evencie (może być opóźnienie Discorda lub event jest zamknięty).`
+        ? `\n⚠️ Nie udało się oznaczyć Cię jako *Interested* na evencie (spróbuję jeszcze raz za 3s).`
         : ''),
     ephemeral: true,
   });
 }
+
 
 
 export async function refreshSignupMessage(guild: Guild, raidId: string) {
