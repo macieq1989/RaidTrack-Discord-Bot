@@ -55,23 +55,29 @@ function wowheadUrl(itemId?: string) {
   return itemId ? `https://www.wowhead.com/item=${itemId}` : undefined;
 }
 
-/** Format a single loot line, in addon-like style. */
-function formatLootLine(e: LootEntry) {
+/** Format pojedynczy wpis loot jako field (lewa/prawa kolumna) */
+function formatLootField(e: LootEntry) {
   const meta = parseItemMeta(e.item);
   const name = meta.name ?? "Unknown Item";
   const link = wowheadUrl(meta.id);
   const player = e.player ?? "Unknown";
   const boss = e.boss && e.boss !== "Auction" ? e.boss : "Auction";
   const gp = Number.isFinite(e.gp as number) ? e.gp : undefined;
-  const t = e.time ? ` \`${e.time}\`` : "";
+  const ts = Number(e.timestamp ?? 0);
 
-  // **Player** — looted [Item](link) from Boss (GP:100) `13:25:57`
-  const itemMd = link ? `[${name}](${link})` : `**${name}**`;
-  const right = gp != null ? `(GP: ${gp})` : "";
-  return `**${player}** — looted ${itemMd} from **${boss}** ${right}${t}`;
+  const date = ts ? new Date(ts * 1000).toLocaleString("pl-PL") : (e.time ?? "");
+
+  // left = kto + item
+  const left = `**${player}**\n${link ? `[${name}](${link})` : name}`;
+  // right = boss + gp + czas
+  const rightParts: string[] = [];
+  if (boss) rightParts.push(`**${boss}**`);
+  if (gp != null) rightParts.push(`GP: ${gp}`);
+  if (date) rightParts.push(date);
+
+  return { left, right: rightParts.join("\n") };
 }
 
-/** Publish a batch of loot entries as a single embed (anti-spam). */
 export async function publishLootBatch(client: Client, entries: LootEntry[]) {
   if (!entries?.length) return;
 
@@ -81,34 +87,36 @@ export async function publishLootBatch(client: Client, entries: LootEntry[]) {
     return;
   }
 
-  // Sort chronologicznie (rosnąco) i odfiltruj śmieci
   const list = entries
     .filter(e => e && (e.item || e.player))
     .sort((a, b) => (Number(a.timestamp ?? 0) - Number(b.timestamp ?? 0)));
 
   if (!list.length) return;
 
-  // kolor embedu = najwyższa jakość z batcha
   const bestColor =
     list
       .map(e => parseItemMeta(e.item).color)
       .filter((c): c is number => typeof c === "number")
       .sort((a, b) => b - a)[0] ?? 0xa335ee;
 
-  // budujemy opis jak w addonie – punktowana lista
-  const lines = list.map(formatLootLine);
-  const description = lines.join("\n");
+  // budujemy pola (fieldy)
+  const fields = list.flatMap(e => {
+    const f = formatLootField(e);
+    return [
+      { name: f.left, value: f.right, inline: true },
+    ];
+  });
 
   const firstTs = list[0]?.timestamp;
   const lastTs = list[list.length - 1]?.timestamp;
   const timeRange =
     firstTs && lastTs && firstTs !== lastTs
-      ? `(${new Date(firstTs * 1000).toLocaleTimeString()} – ${new Date(lastTs * 1000).toLocaleTimeString()})`
-      : "";
+      ? `${new Date(firstTs * 1000).toLocaleString("pl-PL")} – ${new Date(lastTs * 1000).toLocaleString("pl-PL")}`
+      : (firstTs ? new Date(firstTs * 1000).toLocaleString("pl-PL") : "");
 
   const embed = new EmbedBuilder()
     .setTitle("Loot updates")
-    .setDescription(description)
+    .addFields(fields)
     .setColor(bestColor)
     .setFooter({ text: timeRange || "Loot feed" });
 
