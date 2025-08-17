@@ -11,9 +11,11 @@ import { clampEventTitle, RaidPayload } from './mapping.js';
 import { prisma } from '../util/prisma.js';
 import { buildSignupEmbed, rowsForRaid, loadSignups } from './raidSignup.js';
 
-const CREATE_EVENTS = String(process.env.RAID_CREATE_EVENTS ?? 'true') === 'true';
+const parseBool = (v: any) => /^(1|true|yes|y)$/i.test(String(v ?? '').trim());
+const CREATE_EVENTS = parseBool(process.env.RAID_CREATE_EVENTS ?? 'true');
 const FUTURE_LEEWAY_SEC = Number(process.env.RAID_EVENT_LEEWAY_SEC ?? 300);
 const DEFAULT_DURATION_SEC = Number(process.env.RAID_EVENT_DEFAULT_DURATION_SEC ?? 3 * 3600);
+
 
 function resolveChannelId(diff: string): string {
   const key = (diff || '').toUpperCase();
@@ -83,39 +85,52 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
   }
 
   // scheduled event
-  let eventId: string | null = raid.scheduledEventId ?? null;
-  const eventName = clampEventTitle(payload.raidTitle);
-  if (CREATE_EVENTS && !isPast) {
-    try {
-      if (eventId) {
-        const ev = await guild.scheduledEvents.fetch(eventId).catch(() => null);
-        if (ev) {
-          await ev.edit({
-            name: eventName,
-            scheduledStartTime: new Date(startSec * 1000),
-            scheduledEndTime: new Date(endSec * 1000),
-            description: payload.notes || '',
-          }).catch(() => {});
-        } else {
-          eventId = null;
-        }
-      }
-      if (!eventId) {
-        const ev = await guild.scheduledEvents.create({
+let eventId: string | null = raid.scheduledEventId ?? null;
+const eventName = clampEventTitle(payload.raidTitle);
+
+if (CREATE_EVENTS) {
+  try {
+    // Always compute a safe future start for Discord API (at least now+60s)
+    const now = Math.floor(Date.now() / 1000);
+    const minFutureStart = now + 60;
+    const safeStartSec = Math.max(startSec, minFutureStart);
+    const safeEndSec = Math.max(endSec, safeStartSec + 60); // ensure end > start
+
+    if (eventId) {
+      const ev = await guild.scheduledEvents.fetch(eventId).catch(() => null);
+      if (ev) {
+        await ev.edit({
           name: eventName,
-          scheduledStartTime: new Date(startSec * 1000),
-          scheduledEndTime: new Date(endSec * 1000),
-          privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly,
-          entityType: GuildScheduledEventEntityType.External,
-          entityMetadata: { location: 'In-game (WoW)' },
+          scheduledStartTime: new Date(safeStartSec * 1000),
+          scheduledEndTime: new Date(safeEndSec * 1000),
           description: payload.notes || '',
-        }).catch(() => null);
-        if (ev) eventId = ev.id;
+        }).catch((e: any) => {
+          console.warn('[events] edit failed:', e?.message ?? e);
+        });
+      } else {
+        eventId = null; // stale id -> recreate
       }
-    } catch {
-      // ignore
     }
+    if (!eventId) {
+      const ev = await guild.scheduledEvents.create({
+        name: eventName,
+        scheduledStartTime: new Date(safeStartSec * 1000),
+        scheduledEndTime: new Date(safeEndSec * 1000),
+        privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly,
+        entityType: GuildScheduledEventEntityType.External,
+        entityMetadata: { location: 'In-game (WoW)' },
+        description: payload.notes || '',
+      }).catch((e: any) => {
+        console.warn('[events] create failed:', e?.message ?? e);
+        return null;
+      });
+      if (ev) eventId = ev.id;
+    }
+  } catch (e: any) {
+    console.warn('[events] unexpected error:', e?.message ?? e);
   }
+}
+
 
   await prisma.raid.update({
     where: { raidId: payload.raidId },
