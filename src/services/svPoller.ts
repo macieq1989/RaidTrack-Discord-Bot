@@ -4,6 +4,8 @@ import type { Client, Guild } from 'discord.js';
 import { publishOrUpdateRaid } from './publishRaid.js';
 import { cfg } from '../config.js';
 import { deriveDifficultyFromPresetConfig } from './mapping.js';
+import { publishEPGPBoard } from './epgpBoard.js';
+
 
 // ---------- Types & status normalization ----------
 export type SVPollerStatus = {
@@ -336,50 +338,93 @@ export function startSavedVariablesPoller(
       // non-fatal
     }
 
-    // Mode A: JSON export under SV key
-    try {
-      const json = tryExtractJsonExport(text, key);
-      if (json) {
-        status.mode = 'json';
-        let count = 0;
+   // Mode A: JSON export under SV key
+try {
+  const json = tryExtractJsonExport(text, key);
+  if (json) {
+    status.mode = 'json';
+    let count = 0;
 
-        const handleOne = async (packet: any) => {
-          if (!packet?.guildId || !packet?.raid) return;
-          const guild: Guild = await client.guilds.fetch(String(packet.guildId));
+    const handleOne = async (packet: any) => {
+      const gid = String(packet?.guildId || '').trim();
+      if (!gid) return;
 
-          // Normalize minimal JSON -> ensure endAt (if missing) and status
-          const r = { ...packet.raid };
+      const guild: Guild = await client.guilds.fetch(gid);
 
-          // status from SV: normalize and only include if valid
-          const normalized = normalizeStatus(r.status ?? r.state ?? r.raidStatus);
-          if (normalized) r.status = normalized; else delete r.status;
-
-          // endAt fallback
-          if (!r.endAt && r.startAt) r.endAt = Number(r.startAt) + DEFAULT_DURATION_SEC;
-
-          // difficulty fallback via preset config if not provided
-          if (!r.difficulty && r.presetName) {
-            const presetCfg = lastPresetConfigMap[String(r.presetName).trim().toLowerCase()];
-            r.difficulty = deriveDifficultyFromPresetConfig(presetCfg);
-          }
-
-          await publishOrUpdateRaid(guild, r);
-          count++;
-        };
-
-        if (Array.isArray(json)) {
-          for (const item of json) await handleOne(item);
-        } else {
-          await handleOne(json);
+      // ---- EPGP board (optional)
+      if (packet?.epgp) {
+        // normalize: allow array OR object map
+        let entriesRaw = packet.epgp;
+        if (entriesRaw && !Array.isArray(entriesRaw) && typeof entriesRaw === 'object') {
+          entriesRaw = Object.entries(entriesRaw).map(([name, v]: any) => ({
+            username: String(name),
+            ep: Number(v?.ep ?? v?.EP ?? 0),
+            gp: Number(v?.gp ?? v?.GP ?? 0),
+            userId: v?.userId ?? v?.discordId,
+          }));
         }
 
-        status.lastProcessedCount = count;
-        return;
+        const entries = (Array.isArray(entriesRaw) ? entriesRaw : [])
+          .map((e: any) => ({
+            username: String(e?.username ?? e?.name ?? e?.player ?? 'Unknown'),
+            ep: Number(e?.ep ?? e?.EP ?? 0),
+            gp: Number(e?.gp ?? e?.GP ?? 0),
+            userId: e?.userId ?? e?.discordId,
+          }))
+          .filter((e: any) => Number.isFinite(e.ep) && Number.isFinite(e.gp));
+
+        // board "revision" id — nowy id => nowy post, ten sam => edytuj
+        const boardId =
+          packet?.epgpId ??
+          packet?.epgp?.id ??
+          packet?.epgp?.messageId ??
+          packet?.boardId ??
+          packet?.epgpMessageId;
+
+        if (entries.length) {
+          await publishEPGPBoard(guild, entries, { boardId }).catch((e: any) => {
+            console.warn('[SV] EPGP publish failed:', e?.message ?? e);
+          });
+          count++;
+        }
       }
-    } catch (e: any) {
-      // fallthrough to Lua parser
-      status.lastError = `json parse failed: ${e.message}`;
+
+      // ---- Raid publish/update (optional)
+      if (packet?.raid) {
+        const r = { ...packet.raid };
+
+        // status normalize (SV is source of truth)
+        const normalized = normalizeStatus(r.status ?? r.state ?? r.raidStatus);
+        if (normalized) r.status = normalized; else delete r.status;
+
+        // ensure endAt
+        if (!r.endAt && r.startAt) r.endAt = Number(r.startAt) + DEFAULT_DURATION_SEC;
+
+        // difficulty fallback from preset
+        if (!r.difficulty && r.presetName) {
+          const presetCfg = lastPresetConfigMap[String(r.presetName).trim().toLowerCase()];
+          r.difficulty = deriveDifficultyFromPresetConfig(presetCfg);
+        }
+
+        await publishOrUpdateRaid(guild, r);
+        count++;
+      }
+    };
+
+    if (Array.isArray(json)) {
+      for (const item of json) await handleOne(item);
+    } else {
+      await handleOne(json);
     }
+
+    status.lastProcessedCount = count;
+    return;
+  }
+} catch (e: any) {
+  // fallthrough to Lua parser
+  status.lastError = `json parse failed: ${e.message}`;
+}
+
 
     // Mode B: Lua RaidTrackDB.raidInstances
     try {
