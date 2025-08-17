@@ -25,50 +25,70 @@ function findWidthName(entries: EpgpEntry[], min = 10, max = 22) {
   return Math.min(w, max);
 }
 
+function fmtInt(n: number) {
+  return Math.round(n).toString();
+}
+
+function prOf(e: EpgpEntry) {
+  return e.ep / Math.max(1, e.gp);
+}
+
+function medal(idx: number) {
+  return idx === 0 ? '🥇 ' : idx === 1 ? '🥈 ' : idx === 2 ? '🥉 ' : '';
+}
+
 function buildCodeBlock(entries: EpgpEntry[]) {
   const nameW = findWidthName(entries, 10, 22);
-  const header =
-    'Name'.padEnd(nameW) +
-    '  ' + 'EP'.padStart(6) +
-    '  ' + 'GP'.padStart(6) +
-    '  ' + 'PR'.padStart(6);
-
-  const toLine = (e: EpgpEntry) => {
-    const pr = e.ep / Math.max(1, e.gp);
-    const name = (e.username ?? '').slice(0, nameW);
-    return (
-      name.padEnd(nameW) +
-      '  ' + String(Math.round(e.ep)).padStart(6) +
-      '  ' + String(Math.round(e.gp)).padStart(6) +
-      '  ' + pr.toFixed(2).padStart(6)
-    );
-  };
 
   // sort: PR desc, EP desc, name asc
   const sorted = [...entries].sort((a, b) => {
-    const pra = a.ep / Math.max(1, a.gp);
-    const prb = b.ep / Math.max(1, b.gp);
+    const pra = prOf(a);
+    const prb = prOf(b);
     if (prb !== pra) return prb - pra;
     if (b.ep !== a.ep) return b.ep - a.ep;
     return (a.username || '').localeCompare(b.username || '');
   });
 
-  // buduj treść w limicie 4096 (odejmij 6 znaków na ```\n...\n```)
-  const budget = 4096 - 6;
-  const lines: string[] = [header];
-  let used = header.length + 1;
-  let shown = 0;
+  // header + separators (monospace-friendly)
+  const hdrName = 'Name'.padEnd(nameW);
+  const hdr = `${hdrName}  ${'EP'.padStart(6)}  ${'GP'.padStart(6)}  ${'PR'.padStart(6)}`;
+  const line = '─'.repeat(hdr.length);
+  const topLine = `┌${line}┐`;
+  const botLine = `└${line}┘`;
 
-  for (const e of sorted) {
-    const row = toLine(e);
-    if (used + row.length + 1 > budget) break;
+  const toRow = (e: EpgpEntry, i: number) => {
+    const pr = prOf(e);
+    const nm = (e.username ?? '').slice(0, nameW);
+    const nameCol = `${medal(i)}${nm}`.slice(0, nameW + 2).padEnd(nameW + 2); // +2 bo medal może dodać znak
+    return (
+      `${nameCol}${fmtInt(e.ep).padStart(6)}  ${fmtInt(e.gp).padStart(6)}  ${pr.toFixed(2).padStart(6)}`
+    );
+  };
+
+  // limit rows (ENV override)
+  const MAX_ROWS = Math.max(1, Number(process.env.EPGP_MAX_ROWS ?? 20));
+  const shown = Math.min(sorted.length, MAX_ROWS);
+
+  const lines: string[] = [];
+  lines.push(topLine);
+  lines.push(hdr);
+  lines.push('│' + ' '.repeat(hdr.length) + '│'); // small spacer line (visual padding)
+  for (let i = 0; i < shown; i++) {
+    const row = toRow(sorted[i], i);
     lines.push(row);
-    used += row.length + 1;
-    shown++;
   }
+  lines.push(botLine);
 
-  const body = '```\n' + lines.join('\n') + '\n```';
-  return { body, shown, total: sorted.length };
+  // code block + note about truncation (outside the block)
+  const bodyBlock = '```\n' + lines.join('\n') + '\n```';
+  const truncated = shown < sorted.length;
+
+  return {
+    bodyBlock,
+    shown,
+    total: sorted.length,
+    truncated,
+  };
 }
 
 async function findExistingBoardMessage(channel: TextBasedChannel, marker: string) {
@@ -102,20 +122,25 @@ export async function publishEPGPBoard(
   if (!fetched || !isText) throw new Error(`No access to fallback text channel ${chId}`);
   const channel = fetched as TextBasedChannel;
 
-  const { body, shown, total } = buildCodeBlock(entries);
+  const { bodyBlock, shown, total, truncated } = buildCodeBlock(entries);
 
   const marker = opts?.boardId ? `${EPGP_MARKER}:${opts.boardId}` : EPGP_MARKER;
-  const footerText = `${marker} • ${shown}/${total} shown${shown < total ? ' (truncated)' : ''}`;
+
+  // Friendly footer text
+  const footerText = `${marker} • ${shown}/${total} shown${truncated ? ' (truncated)' : ''}`;
+
+  // Human line with relative time (Discord renders it nicely)
+  const nowSec = Math.floor(Date.now() / 1000);
+  const humanWhen = `Updated <t:${nowSec}:R>`;
 
   const embed = new EmbedBuilder()
     .setTitle('EPGP')
-    .setDescription(body)
-    .setColor(0x5865f2)
+    .setDescription(`${bodyBlock}\n_${humanWhen}_`)
+    .setColor(0x2ecc71) // subtle green to suggest "synced/ok"
     .setTimestamp(new Date())
     .setFooter({ text: footerText });
 
-  // Edytujemy tylko jeśli znajdziemy wiadomość z **tym samym markerem** (czyli tym samym boardId).
-  // Gdy boardId jest nowe → nie ma dopasowania → tworzymy nową wiadomość.
+  // Edit only if we find a message with the SAME marker (same boardId).
   const existing = await findExistingBoardMessage(channel, marker);
   if (existing) {
     await existing.edit({ content: null, embeds: [embed], components: [], attachments: [] }).catch(() => {});
