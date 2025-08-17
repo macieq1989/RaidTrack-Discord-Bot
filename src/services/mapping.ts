@@ -4,13 +4,28 @@ export type Difficulty = 'NORMAL' | 'HEROIC' | 'MYTHIC' | string;
 
 export type RaidPayload = {
   raidId: string;
-  raidTitle: string;        // EXACT title from addon
-  difficulty: Difficulty;
-  startAt: number;          // unix seconds
-  endAt?: number;           // unix seconds (optional; fallback set in publisher)
+  raidTitle: string;
+  difficulty: string;
+  startAt?: number;
+  endAt?: number;
   notes?: string;
-  caps?: { tank?: number; healer?: number; melee?: number; ranged?: number };
+  caps?: { tank?: number; healer?: number; dps?: number };
+  status?: 'CREATED' | 'STARTED' | 'ENDED'; // <— NEW
 };
+
+const SV_STATUS_MAP: Record<string, RaidPayload['status']> = {
+  CREATED: 'CREATED',
+  STARTED: 'STARTED',
+  ENDED: 'ENDED',
+  // jeśli addon używa innych stringów, dopisz tu translację:
+  // 'ACTIVE': 'STARTED',
+  // 'FINISHED': 'ENDED',
+};
+
+export function mapSvStatus(raw: any): RaidPayload['status'] | undefined {
+  const s = String(raw ?? '').toUpperCase().trim();
+  return SV_STATUS_MAP[s];
+}
 
 export const DISCORD_LIMITS = {
   EMBED_TITLE: 256,

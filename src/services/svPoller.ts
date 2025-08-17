@@ -5,6 +5,7 @@ import { publishOrUpdateRaid } from './publishRaid.js';
 import { cfg } from '../config.js';
 import { deriveDifficultyFromPresetConfig } from './mapping.js';
 
+// ---------- Types & status normalization ----------
 export type SVPollerStatus = {
   filePath: string;
   key: string;
@@ -16,6 +17,18 @@ export type SVPollerStatus = {
   mode?: 'json' | 'lua';
 };
 
+type NormalizedStatus = 'CREATED' | 'STARTED' | 'ENDED';
+
+function normalizeStatus(raw: any): NormalizedStatus | undefined {
+  const s = String(raw ?? '').trim().toUpperCase();
+  if (s === 'CREATED' || s === 'STARTED' || s === 'ENDED') return s;
+  // map any legacy/custom values here if addon exports differently:
+  // if (s === 'ACTIVE') return 'STARTED';
+  // if (s === 'FINISHED' || s === 'COMPLETED') return 'ENDED';
+  return undefined;
+}
+
+// ---------- Internal state ----------
 const status: SVPollerStatus = {
   filePath: '',
   key: '',
@@ -28,9 +41,9 @@ let lastPresetConfigMap: Record<
   { selectedDifficulty?: string; bosses?: Record<string, Record<string, number>> }
 > = {};
 
-// default duration for endAt when SV does not provide "ended"
 const DEFAULT_DURATION_SEC = Number(process.env.RAID_EVENT_DEFAULT_DURATION_SEC ?? 3 * 3600);
 
+// ---------- Helpers ----------
 function unescapeLuaQuotedString(s: string): string {
   return s
     .replace(/\\n/g, '\n')
@@ -256,10 +269,7 @@ function mapLuaRaidToIngest(raid: Record<string, any>) {
       : (startAt ? startAt + DEFAULT_DURATION_SEC : undefined);
 
   // normalize status if present
-  const statusRaw = typeof raid.status === 'string' ? raid.status.trim().toUpperCase() : undefined;
-  const status = (statusRaw === 'CREATED' || statusRaw === 'STARTED' || statusRaw === 'ENDED')
-    ? statusRaw
-    : undefined;
+  const status = normalizeStatus(raid.status);
 
   const notesParts: string[] = [];
   if (raid.status) notesParts.push(`status:${raid.status}`);
@@ -271,6 +281,7 @@ function mapLuaRaidToIngest(raid: Record<string, any>) {
   return { raidId, raidTitle, difficulty, startAt, endAt, notes, status };
 }
 
+// ---------- Poller ----------
 export function startSavedVariablesPoller(
   client: Client,
   opts: { filePath: string; key: string; intervalMs?: number }
@@ -336,10 +347,21 @@ export function startSavedVariablesPoller(
           if (!packet?.guildId || !packet?.raid) return;
           const guild: Guild = await client.guilds.fetch(String(packet.guildId));
 
-          // Normalizacja minimalna JSON -> zapewnij endAt (jak brak)
-          const r = packet.raid;
+          // Normalize minimal JSON -> ensure endAt (if missing) and status
+          const r = { ...packet.raid };
+
+          // status from SV: normalize and only include if valid
+          const normalized = normalizeStatus(r.status ?? r.state ?? r.raidStatus);
+          if (normalized) r.status = normalized; else delete r.status;
+
+          // endAt fallback
           if (!r.endAt && r.startAt) r.endAt = Number(r.startAt) + DEFAULT_DURATION_SEC;
-          // (status — jeśli jest w JSON — przechodzi dalej; publishRaid nie zapisuje go do DB)
+
+          // difficulty fallback via preset config if not provided
+          if (!r.difficulty && r.presetName) {
+            const presetCfg = lastPresetConfigMap[String(r.presetName).trim().toLowerCase()];
+            r.difficulty = deriveDifficultyFromPresetConfig(presetCfg);
+          }
 
           await publishOrUpdateRaid(guild, r);
           count++;
@@ -376,15 +398,20 @@ export function startSavedVariablesPoller(
 
       let count = 0;
       for (const r of raids) {
+        const payload = mapLuaRaidToIngest(r);
+        if (!payload.startAt) {
+          console.warn('[SV] skip raid (no startAt):', payload.raidId ?? payload.raidTitle);
+          continue;
+        }
         try {
-          const payload = mapLuaRaidToIngest(r);
-          if (!payload.startAt) continue; // basic sanity
           const guild: Guild = await client.guilds.fetch(String(defaultGuildId));
           await publishOrUpdateRaid(guild, payload as any);
           count++;
         } catch (e: any) {
-          // if a single entry fails to map (e.g., missing preset config), skip it
-          console.warn('[SV] skip raid due to mapping error:', e?.message ?? e);
+          console.warn(
+            `[SV] skip raid due to mapping/publish error (raidId=${payload.raidId}):`,
+            e?.message ?? e
+          );
         }
       }
       status.lastProcessedCount = count;

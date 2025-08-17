@@ -5,7 +5,6 @@ import {
   GuildScheduledEventEntityType,
   GuildScheduledEventPrivacyLevel,
 } from 'discord.js';
-
 import { cfg } from '../config.js';
 import { clampEventTitle, RaidPayload } from './mapping.js';
 import { prisma } from '../util/prisma.js';
@@ -33,14 +32,12 @@ function getDifficultyColor(diffRaw: string | undefined) {
 }
 
 export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
-  // --- channel
   const chId = resolveChannelId(payload.difficulty);
   const fetched = await guild.channels.fetch(chId).catch(() => null);
   const isText = (fetched as any)?.isTextBased?.() === true;
   if (!fetched || !isText) throw new Error(`No access to text channel ${chId}`);
   const channel = fetched as TextBasedChannel;
 
-  // --- timestamps
   const nowSec = Math.floor(Date.now() / 1000);
   let startSec = Number(payload.startAt || (nowSec + FUTURE_LEEWAY_SEC));
   let endSec = payload.endAt != null ? Number(payload.endAt) : (startSec + DEFAULT_DURATION_SEC);
@@ -49,7 +46,7 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
 
   const isPast = startSec < (nowSec + FUTURE_LEEWAY_SEC);
 
-  // --- DB upsert (no 'status' writes at all)
+  // create/update; write status ONLY if provided by payload (SV is source of truth)
   const raid = await prisma.raid.upsert({
     where: { raidId: payload.raidId },
     create: {
@@ -60,6 +57,7 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
       endAt: new Date(endSec * 1000),
       notes: payload.notes ?? '',
       channelId: chId,
+      ...(payload.status ? { status: payload.status } : {}),
     },
     update: {
       raidTitle: payload.raidTitle,
@@ -68,49 +66,22 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
       endAt: new Date(endSec * 1000),
       notes: payload.notes ?? '',
       channelId: chId,
+      ...(payload.status ? { status: payload.status } : {}), // <— tu jest kluczowa zmiana
     },
   });
 
-  // --- allowSignups: prefer DB status if present, otherwise fallback to time
-  const raidStatus = (raid as any)?.status as string | undefined;
-  const allowSignups = typeof raidStatus === 'string'
-    ? raidStatus === 'CREATED'
-    : (Math.floor(Date.now() / 1000) < startSec);
-
-  // --- embed + components
-  const signupsFlat = await loadSignups(payload.raidId, guild);
-  const embed = buildSignupEmbed(
-    {
-      raidId: payload.raidId,
-      raidTitle: payload.raidTitle,
-      difficulty: payload.difficulty,
-      startAt: startSec,
-      endAt: endSec,
-      notes: payload.notes,
-      status: raidStatus, // read-only display if column exists
-    },
-    payload.caps,
-    signupsFlat,
-  );
-  embed.setColor(getDifficultyColor(payload.difficulty));
-  const components = rowsForRaid(payload.raidId, { allowSignups });
-
-  // --- message create/update
+  // message
   let messageId: string | null = raid.messageId ?? null;
   if (messageId) {
     const msg = await (channel as any).messages?.fetch?.(messageId).catch(() => null);
-    if (msg) {
-      await msg.edit({ embeds: [embed], components, attachments: [] }).catch(() => {});
-    } else {
-      messageId = null;
-    }
+    if (!msg) messageId = null;
   }
   if (!messageId) {
-    const sent = await (channel as any).send({ embeds: [embed], components }).catch(() => null);
+    const sent = await (channel as any).send({ content: '⏳ Preparing raid embed…' }).catch(() => null);
     if (sent) messageId = sent.id;
   }
 
-  // --- scheduled event (only for future)
+  // scheduled event
   let eventId: string | null = raid.scheduledEventId ?? null;
   const eventName = clampEventTitle(payload.raidTitle);
   if (CREATE_EVENTS && !isPast) {
@@ -145,11 +116,47 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
     }
   }
 
-  // --- persist message/event IDs
   await prisma.raid.update({
     where: { raidId: payload.raidId },
     data: { messageId, scheduledEventId: eventId },
   });
+
+  // fetch fresh status (after potential update)
+  const fresh = await prisma.raid.findUnique({
+    where: { raidId: payload.raidId },
+    select: { status: true },
+  });
+  const raidStatus = fresh?.status;
+
+  // allowSignups: SV/DB wins if status is present; fallback = czas
+  const allowSignups =
+    typeof raidStatus === 'string' ? raidStatus === 'CREATED' : (Math.floor(Date.now() / 1000) < startSec);
+
+  const signupsFlat = await loadSignups(payload.raidId, guild);
+  const embed = buildSignupEmbed(
+    {
+      raidId: payload.raidId,
+      raidTitle: payload.raidTitle,
+      difficulty: payload.difficulty,
+      startAt: startSec,
+      endAt: endSec,
+      notes: payload.notes,
+      status: raidStatus,
+    },
+    payload.caps,
+    signupsFlat,
+  ).setColor(getDifficultyColor(payload.difficulty));
+
+  const components = rowsForRaid(payload.raidId, { allowSignups });
+
+  if (messageId) {
+    const msg = await (channel as any).messages?.fetch?.(messageId).catch(() => null);
+    if (msg) {
+      await msg.edit({ content: null, embeds: [embed], components, attachments: [] }).catch(() => {});
+    } else {
+      await (channel as any).send({ embeds: [embed], components }).catch(() => null);
+    }
+  }
 
   return { channelId: chId, messageId, eventId };
 }
