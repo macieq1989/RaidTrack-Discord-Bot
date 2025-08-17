@@ -1,15 +1,16 @@
 import {
   ActionRowBuilder, ButtonBuilder, ButtonInteraction, ButtonStyle,
   StringSelectMenuBuilder, StringSelectMenuInteraction, EmbedBuilder, Guild,
+  GuildScheduledEventStatus,
 } from 'discord.js';
 import { prisma } from '../util/prisma.js';
 import { classSpecEmoji } from './profileIcons.js';
 import type { PlayerEntry, SignupsGrouped } from './rosterImage.js';
 import { cfg } from '../config.js';
-
 import {
   getPlayerProfile, upsertPlayerProfile, listClasses, listSpecs, isValidClassSpec,
 } from './playerProfile.js';
+import { setEventInterestByRaidId } from './eventInterest.js';
 
 export type RoleKey = 'TANK'|'HEALER'|'MELEE'|'RANGED'|'MAYBE'|'ABSENT';
 
@@ -235,7 +236,7 @@ export function buildSignupEmbed(
   return embed;
 }
 
-// ---------- BUTTONS / ROWY ----------
+// ---------- BUTTONY / WIERSZE ----------
 export function roleButtonsRow(raidId: string, disabled = false): ActionRowBuilder<ButtonBuilder> {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId(`signup:role:${raidId}:TANK`).setLabel('Tank').setStyle(ButtonStyle.Primary).setDisabled(disabled),
@@ -369,7 +370,7 @@ function specSelectRow(raidId: string, forRole: RoleKey, classKey: string) {
 
 async function upsertSignupWithProfile(
   i: ButtonInteraction | StringSelectMenuInteraction,
-  _guild: Guild,
+  guild: Guild,
   raidId: string,
   role: RoleKey,
   classKey?: string,
@@ -381,6 +382,10 @@ async function upsertSignupWithProfile(
     create: { raidId, userId: i.user.id, username: i.user.username, role },
     update: { role },
   });
+
+  // Auto "Interested" on event (role != ABSENT), else remove
+  const shouldBeInterested = role !== 'ABSENT';
+  await setEventInterestByRaidId(guild, raidId, i.user.id, shouldBeInterested).catch(() => {});
 
   const emoji = (classKey && specKey) ? classSpecEmoji(classKey, specKey, role) : '✅';
   await i.reply({
@@ -403,6 +408,20 @@ export async function refreshSignupMessage(guild: Guild, raidId: string) {
   const signups = await loadSignups(raidId, guild);
 
   const raidStatus = (raid as any)?.status as string | undefined;
+
+  // If raid ended -> finish the scheduled event if present
+  if (raidStatus === 'ENDED' && raid.scheduledEventId) {
+    try {
+      const ev = await guild.scheduledEvents.fetch(raid.scheduledEventId).catch(() => null);
+      if (ev && ev.status !== GuildScheduledEventStatus.Completed && ev.status !== GuildScheduledEventStatus.Canceled) {
+        await ev.edit({
+          status: GuildScheduledEventStatus.Completed,
+          scheduledEndTime: new Date(), // close now
+        }).catch(() => {});
+      }
+    } catch { /* ignore */ }
+  }
+
   const embed = buildSignupEmbed(
     {
       raidId,

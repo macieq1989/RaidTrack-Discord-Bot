@@ -4,6 +4,7 @@ import {
   TextBasedChannel,
   GuildScheduledEventEntityType,
   GuildScheduledEventPrivacyLevel,
+  GuildScheduledEventStatus,
 } from 'discord.js';
 import { cfg } from '../config.js';
 import { clampEventTitle, RaidPayload } from './mapping.js';
@@ -66,7 +67,7 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
       endAt: new Date(endSec * 1000),
       notes: payload.notes ?? '',
       channelId: chId,
-      ...(payload.status ? { status: payload.status } : {}), // <— tu jest kluczowa zmiana
+      ...(payload.status ? { status: payload.status } : {}),
     },
   });
 
@@ -124,11 +125,30 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
   // fetch fresh status (after potential update)
   const fresh = await prisma.raid.findUnique({
     where: { raidId: payload.raidId },
-    select: { status: true },
+    select: { status: true, scheduledEventId: true },
   });
   const raidStatus = fresh?.status;
 
-  // allowSignups: SV/DB wins if status is present; fallback = czas
+  // --- NEW: if raid ended -> mark event as Completed
+  if (raidStatus === 'ENDED' && fresh?.scheduledEventId) {
+    try {
+      const ev = await guild.scheduledEvents.fetch(fresh.scheduledEventId).catch(() => null);
+      if (
+        ev &&
+        ev.status !== GuildScheduledEventStatus.Completed &&
+        ev.status !== GuildScheduledEventStatus.Canceled
+      ) {
+        await ev.edit({
+          status: GuildScheduledEventStatus.Completed,
+          scheduledEndTime: new Date(), // close now
+        }).catch(() => {});
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // allowSignups: DB/SV wins if status present; fallback = time
   const allowSignups =
     typeof raidStatus === 'string' ? raidStatus === 'CREATED' : (Math.floor(Date.now() / 1000) < startSec);
 
