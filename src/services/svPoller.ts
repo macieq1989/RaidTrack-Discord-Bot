@@ -5,7 +5,7 @@ import { publishOrUpdateRaid } from './publishRaid.js';
 import { cfg } from '../config.js';
 import { deriveDifficultyFromPresetConfig } from './mapping.js';
 import { publishEPGPBoard } from './epgpBoard.js';
-import { publishLoot } from './publishLoot.js';
+import { publishLootBatch } from "./publishLoot.js";
 
 // ---------- tiny logger ----------
 const dbg = (...args: any[]) => console.log('[SV]', ...args);
@@ -407,53 +407,68 @@ export function startSavedVariablesPoller(
 
   let lastSig = '';
 
-  async function maybePublishLootArray(arr: any[]) {
-    if (!Array.isArray(arr) || arr.length === 0) return 0;
+async function maybePublishLootArray(arr: any[]) {
+  if (!Array.isArray(arr) || arr.length === 0) return 0;
 
-    // filter only new entries (by timestamp first, fallback to id)
-    const fresh = arr.filter((e) => {
-      const ts = Number(e?.timestamp ?? 0);
-      const id = Number(e?.id ?? 0);
-      if (Number.isFinite(ts) && ts > 0) {
-        return ts > lastLootMaxTs;
-      }
-      return Number.isFinite(id) && id > lastLootMaxId;
-    });
+  // filter only new entries (by timestamp first, fallback to id)
+  const fresh = arr.filter((e) => {
+    const ts = Number(e?.timestamp ?? 0);
+    const id = Number(e?.id ?? 0);
+    if (Number.isFinite(ts) && ts > 0) return ts > lastLootMaxTs;
+    return Number.isFinite(id) && id > lastLootMaxId;
+  });
 
-    // sort ascending by timestamp/id to post in order
-    fresh.sort((a, b) => {
-      const ta = Number(a?.timestamp ?? 0);
-      const tb = Number(b?.timestamp ?? 0);
-      if (ta && tb) return ta - tb;
-      const ia = Number(a?.id ?? 0);
-      const ib = Number(b?.id ?? 0);
-      return ia - ib;
-    });
+  if (!fresh.length) return 0;
 
-    let sent = 0;
-    for (const loot of fresh) {
-      try {
-        await publishLoot(client, {
-          id: Number(loot?.id ?? 0),
-          player: String(loot?.player ?? loot?.username ?? 'Unknown'),
-          item: String(loot?.item ?? ''),
-          boss: String(loot?.boss ?? ''),
-          gp: Number(loot?.gp ?? 0),
-          time: String(loot?.time ?? ''),
-          timestamp: Number(loot?.timestamp ?? 0),
-        });
-        const ts = Number(loot?.timestamp ?? 0);
-        const id = Number(loot?.id ?? 0);
-        if (Number.isFinite(ts) && ts > lastLootMaxTs) lastLootMaxTs = ts;
-        if (Number.isFinite(id) && id > lastLootMaxId) lastLootMaxId = id;
-        sent++;
-      } catch (e: any) {
-        console.warn('[SV] loot publish failed:', e?.message ?? e);
-      }
+  // sort ascending by timestamp/id to post in order
+  fresh.sort((a, b) => {
+    const ta = Number(a?.timestamp ?? 0);
+    const tb = Number(b?.timestamp ?? 0);
+    if (ta && tb) return ta - tb;
+    const ia = Number(a?.id ?? 0);
+    const ib = Number(b?.id ?? 0);
+    return ia - ib;
+  });
+
+  // anti-spam: cap per tick
+  const MAX_PER_TICK = Number(process.env.LOOT_MAX_PER_TICK ?? 12);
+  const batchSrc = fresh.slice(0, Math.max(1, MAX_PER_TICK));
+
+  // map to LootEntry[]
+  const batch = batchSrc.map((loot) => ({
+    id: Number(loot?.id ?? 0),
+    player: String(loot?.player ?? loot?.username ?? 'Unknown'),
+    item: String(loot?.item ?? ''),
+    boss: String(loot?.boss ?? ''),
+    gp: Number(loot?.gp ?? 0),
+    time: String(loot?.time ?? ''),
+    timestamp: Number(loot?.timestamp ?? 0),
+  }));
+
+  try {
+    await publishLootBatch(client, batch);
+
+    // update high-water marks AFTER successful publish
+    for (const loot of batchSrc) {
+      const ts = Number(loot?.timestamp ?? 0);
+      const id = Number(loot?.id ?? 0);
+      if (Number.isFinite(ts) && ts > lastLootMaxTs) lastLootMaxTs = ts;
+      if (Number.isFinite(id) && id > lastLootMaxId) lastLootMaxId = id;
     }
-    if (sent) dbg(`loot: published ${sent} new entr${sent === 1 ? 'y' : 'ies'}`);
-    return sent;
+
+    const skipped = fresh.length - batchSrc.length;
+    dbg(
+      `loot: published ${batchSrc.length} entr${batchSrc.length === 1 ? 'y' : 'ies'}`
+      + (skipped > 0 ? ` (+${skipped} pending next tick)` : '')
+    );
+
+    return batchSrc.length;
+  } catch (e: any) {
+    console.warn('[SV] loot batch publish failed:', e?.message ?? e);
+    return 0;
   }
+}
+
 
   async function tick() {
     status.lastCheck = new Date().toISOString();
