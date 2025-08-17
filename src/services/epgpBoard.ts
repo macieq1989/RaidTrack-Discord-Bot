@@ -19,69 +19,76 @@ function resolveFallbackChannelId(): string {
   return cfg.fallbackChannel;
 }
 
-function findWidthName(entries: EpgpEntry[], min = 8, max = 22) {
-  let w = min;
-  for (const e of entries) w = Math.max(w, (e.username ?? "").length + 2); // +2 na emoji 🥇
-  return Math.min(w, max);
+// pomocnicze — ucinanie/pad do width
+function safeCell(txt: string, width: number, align: "left" | "right" = "left"): string {
+  if (txt.length > width) {
+    return align === "left"
+      ? txt.slice(0, width - 1) + "…"
+      : "…" + txt.slice(txt.length - (width - 1));
+  }
+  return align === "left" ? txt.padEnd(width) : txt.padStart(width);
+}
+
+// kompaktowanie dużych liczb
+function formatNum(n: number, width: number): string {
+  if (!Number.isFinite(n)) return "?".padStart(width);
+  let s: string;
+  if (Math.abs(n) >= 1e9) s = (n / 1e9).toFixed(1) + "B";
+  else if (Math.abs(n) >= 1e6) s = (n / 1e6).toFixed(1) + "M";
+  else if (Math.abs(n) >= 1e3) s = (n / 1e3).toFixed(1) + "k";
+  else s = n.toString();
+
+  return safeCell(s, width, "right");
 }
 
 function buildCodeBlock(entries: EpgpEntry[]) {
-  const nameW = findWidthName(entries, 10, 22);
-  const colW = { EP: 6, GP: 6, PR: 7 };
-
-  // ✅ pad ma właściwy typ tablicy unii
-  const makeRow = (cols: string[], widths: number[], pad: ("L" | "R")[] = []) => {
-    return (
-      "│ " +
-      cols
-        .map((c, i) =>
-          (pad[i] === "L" ? c.padStart(widths[i]) : c.padEnd(widths[i]))
-        )
-        .join(" │ ") +
-      " │"
-    );
-  };
-
-  const header = makeRow(
-    ["Name", "EP", "GP", "PR"],
-    [nameW, colW.EP, colW.GP, colW.PR],
-    ["R", "L", "L", "L"]
-  );
-
-  const sep =
-    "├" +
-    "─".repeat(nameW + 2) +
-    "┼" +
-    "─".repeat(colW.EP + 2) +
-    "┼" +
-    "─".repeat(colW.GP + 2) +
-    "┼" +
-    "─".repeat(colW.PR + 2) +
-    "┤";
+  const nameW = 16;
+  const numW = 8;
 
   const top =
     "┌" +
-    "─".repeat(nameW + 2) +
+    "─".repeat(nameW) +
     "┬" +
-    "─".repeat(colW.EP + 2) +
+    "─".repeat(numW) +
     "┬" +
-    "─".repeat(colW.GP + 2) +
+    "─".repeat(numW) +
     "┬" +
-    "─".repeat(colW.PR + 2) +
+    "─".repeat(numW) +
     "┐";
+
+  const header =
+    "│" +
+    safeCell("Name", nameW) +
+    "│" +
+    safeCell("EP", numW, "right") +
+    "│" +
+    safeCell("GP", numW, "right") +
+    "│" +
+    safeCell("PR", numW, "right") +
+    "│";
+
+  const sep =
+    "├" +
+    "─".repeat(nameW) +
+    "┼" +
+    "─".repeat(numW) +
+    "┼" +
+    "─".repeat(numW) +
+    "┼" +
+    "─".repeat(numW) +
+    "┤";
 
   const bottom =
     "└" +
-    "─".repeat(nameW + 2) +
+    "─".repeat(nameW) +
     "┴" +
-    "─".repeat(colW.EP + 2) +
+    "─".repeat(numW) +
     "┴" +
-    "─".repeat(colW.GP + 2) +
+    "─".repeat(numW) +
     "┴" +
-    "─".repeat(colW.PR + 2) +
+    "─".repeat(numW) +
     "┘";
 
-  // sort: PR desc, EP desc, name asc
   const sorted = [...entries].sort((a, b) => {
     const pra = a.ep / Math.max(1, a.gp);
     const prb = b.ep / Math.max(1, b.gp);
@@ -90,23 +97,42 @@ function buildCodeBlock(entries: EpgpEntry[]) {
     return (a.username || "").localeCompare(b.username || "");
   });
 
-  const medals = ["🥇", "🥈", "🥉"];
-
-  const rows = sorted.map((e, i) => {
+  const toLine = (e: EpgpEntry, rank?: number) => {
     const pr = e.ep / Math.max(1, e.gp);
-    const medal = i < 3 ? medals[i] + " " : "";
-    const name = (medal + (e.username ?? "")).slice(0, nameW);
-    return makeRow(
-      [name, String(Math.round(e.ep)), String(Math.round(e.gp)), pr.toFixed(2)],
-      [nameW, colW.EP, colW.GP, colW.PR],
-      ["R", "L", "L", "L"]
+    let name = e.username ?? "";
+    if (rank === 1) name = "¹ " + name;
+    else if (rank === 2) name = "² " + name;
+    else if (rank === 3) name = "³ " + name;
+    return (
+      "│" +
+      safeCell(name, nameW) +
+      "│" +
+      formatNum(Math.round(e.ep), numW) +
+      "│" +
+      formatNum(Math.round(e.gp), numW) +
+      "│" +
+      safeCell(pr.toFixed(2), numW, "right") +
+      "│"
     );
-  });
+  };
 
-  const lines = [top, header, sep, ...rows, bottom];
+  const budget = 4096 - 6;
+  const lines: string[] = [top, header, sep];
+  let used = top.length + header.length + sep.length + 3;
+  let shown = 0;
+
+  for (let i = 0; i < sorted.length; i++) {
+    const row = toLine(sorted[i], i + 1);
+    if (used + row.length + 1 > budget) break;
+    lines.push(row);
+    used += row.length + 1;
+    shown++;
+  }
+
+  lines.push(bottom);
+
   const body = "```\n" + lines.join("\n") + "\n```";
-
-  return { body, shown: sorted.length, total: sorted.length };
+  return { body, shown, total: sorted.length };
 }
 
 async function findExistingBoardMessage(channel: TextBasedChannel, marker: string) {
@@ -139,18 +165,20 @@ export async function publishEPGPBoard(
   const { body, shown, total } = buildCodeBlock(entries);
 
   const marker = opts?.boardId ? `${EPGP_MARKER}:${opts.boardId}` : EPGP_MARKER;
-  const footerText = `${marker} • ${shown}/${total} shown`;
+  const footerText = `${marker} • ${shown}/${total} shown${shown < total ? " (truncated)" : ""}`;
 
   const embed = new EmbedBuilder()
     .setTitle("EPGP")
     .setDescription(body)
-    .setColor(0x9b59b6) // epic purple
+    .setColor(0x9b59b6) // fioletowy epicki
     .setTimestamp(new Date())
     .setFooter({ text: footerText });
 
   const existing = await findExistingBoardMessage(channel, marker);
   if (existing) {
-    await existing.edit({ content: null, embeds: [embed], components: [], attachments: [] }).catch(() => {});
+    await existing
+      .edit({ content: null, embeds: [embed], components: [], attachments: [] })
+      .catch(() => {});
     return existing.id as string;
   } else {
     const msg = await (channel as any).send({ embeds: [embed] }).catch(() => null);
