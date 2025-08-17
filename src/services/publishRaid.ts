@@ -144,6 +144,21 @@ if (CREATE_EVENTS) {
   });
   const raidStatus = fresh?.status;
 
+  // --- switch event to Active when raid is STARTED
+if (raidStatus === 'STARTED' && fresh?.scheduledEventId) {
+  try {
+    const ev = await guild.scheduledEvents.fetch(fresh.scheduledEventId).catch(() => null);
+    if (ev && ev.status !== GuildScheduledEventStatus.Active) {
+      await ev.edit({
+        status: GuildScheduledEventStatus.Active,
+      }).catch((e: any) => console.warn('[events] activate failed:', e?.message ?? e));
+    }
+  } catch (e: any) {
+    console.warn('[events] activate unexpected:', e?.message ?? e);
+  }
+}
+
+
   // --- NEW: if raid ended -> mark event as Completed
   if (raidStatus === 'ENDED' && fresh?.scheduledEventId) {
     try {

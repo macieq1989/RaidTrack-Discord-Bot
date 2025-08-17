@@ -2,6 +2,10 @@
 import { Guild } from 'discord.js';
 import { prisma } from '../util/prisma.js';
 
+/**
+ * Mark/unmark user as "Interested" on a scheduled event linked to a raid.
+ * Requires the bot to have MANAGE_EVENTS permission in the guild.
+ */
 export async function setEventInterestByRaidId(
   guild: Guild,
   raidId: string,
@@ -15,18 +19,25 @@ export async function setEventInterestByRaidId(
   const eventId = raid?.scheduledEventId;
   if (!eventId) return false;
 
-  // Build the REST route explicitly so TS sees it as `/${string}`
+  // Explicit route so TS sees `/${string}`
   const route = `/guilds/${guild.id}/scheduled-events/${eventId}/users/${userId}` as `/${string}`;
 
   try {
     if (interested) {
-      await guild.client.rest.put(route);     // mark as Interested
+      // Some djs setups expect an options object even with empty body
+      await guild.client.rest.put(route, {}).catch((e: any) => {
+        throw e;
+      });
     } else {
-      await guild.client.rest.delete(route);  // remove Interested
+      await guild.client.rest.delete(route).catch((e: any) => {
+        throw e;
+      });
     }
     return true;
-  } catch (err) {
-    console.warn('setEventInterest error:', (err as any)?.message ?? err);
+  } catch (err: any) {
+    const msg = err?.message ?? String(err);
+    const code = err?.code ?? err?.status ?? '';
+    console.warn(`[events] setInterested failed (raid=${raidId}, user=${userId}):`, code, msg);
     return false;
   }
 }

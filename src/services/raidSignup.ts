@@ -387,6 +387,8 @@ async function upsertSignupWithProfile(
   const shouldBeInterested = role !== 'ABSENT';
   await setEventInterestByRaidId(guild, raidId, i.user.id, shouldBeInterested).catch(() => {});
 
+  
+
   const emoji = (classKey && specKey) ? classSpecEmoji(classKey, specKey, role) : '✅';
   await i.reply({
     content: `${emoji} Saved: **${role}** for **${i.user.username}**${classKey && specKey ? ` (${classKey}/${specKey}).` : '.'}`,
