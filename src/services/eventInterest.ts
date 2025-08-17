@@ -2,10 +2,30 @@
 import { Guild } from 'discord.js';
 import { prisma } from '../util/prisma.js';
 
-/**
- * Mark/unmark user as "Interested" on a scheduled event linked to a raid.
- * Requires the bot to have MANAGE_EVENTS permission in the guild.
- */
+function userRoute(guildId: string, eventId: string, userId: string) {
+  return `/guilds/${guildId}/scheduled-events/${eventId}/users/${userId}` as `/${string}`;
+}
+function usersRoute(guildId: string, eventId: string, params?: Record<string, string | number | boolean>) {
+  const base = `/guilds/${guildId}/scheduled-events/${eventId}/users` as `/${string}`;
+  if (!params) return base;
+  const qs = new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)]));
+  return `${base}?${qs.toString()}` as `/${string}`;
+}
+
+async function verifyInterested(guild: Guild, eventId: string, userId: string): Promise<boolean> {
+  try {
+    // 100 wystarczy do testów; przy większych eventach dorób paginację po 'after'
+    const route = usersRoute(guild.id, eventId, { limit: 100, with_member: false });
+    const res = (await guild.client.rest.get(route)) as any[];
+    if (!Array.isArray(res)) return false;
+    return res.some(u => (u?.user?.id ?? u?.user_id) === userId);
+  } catch (e: any) {
+    console.warn('[events] verify failed:', e?.status ?? '', e?.message ?? e);
+    return false;
+  }
+}
+
+/** Dodaj/usuń "Interested" na evencie skojarzonym z raidem. Wymaga MANAGE_EVENTS. */
 export async function setEventInterestByRaidId(
   guild: Guild,
   raidId: string,
@@ -19,25 +39,25 @@ export async function setEventInterestByRaidId(
   const eventId = raid?.scheduledEventId;
   if (!eventId) return false;
 
-  // Explicit route so TS sees `/${string}`
-  const route = `/guilds/${guild.id}/scheduled-events/${eventId}/users/${userId}` as `/${string}`;
+  const route = userRoute(guild.id, eventId, userId);
 
   try {
     if (interested) {
-      // Some djs setups expect an options object even with empty body
-      await guild.client.rest.put(route, {}).catch((e: any) => {
-        throw e;
-      });
+      await guild.client.rest.put(route, { auth: true, passThroughBody: true });
     } else {
-      await guild.client.rest.delete(route).catch((e: any) => {
-        throw e;
-      });
+      await guild.client.rest.delete(route, { auth: true, passThroughBody: true });
     }
-    return true;
   } catch (err: any) {
-    const msg = err?.message ?? String(err);
-    const code = err?.code ?? err?.status ?? '';
-    console.warn(`[events] setInterested failed (raid=${raidId}, user=${userId}):`, code, msg);
+    // to nam powie dokładnie co nie pasi po stronie Discorda
+    console.warn(
+      `[events] interested ${interested ? 'PUT' : 'DELETE'} failed:`,
+      err?.status ?? err?.code ?? '',
+      err?.rawError ?? err?.message ?? err
+    );
     return false;
   }
+
+  const ok = await verifyInterested(guild, eventId, userId);
+  if (!ok) console.warn('[events] verification failed: user not present on event after request');
+  return ok;
 }
