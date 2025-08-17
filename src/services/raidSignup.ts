@@ -34,6 +34,15 @@ const SPEC_ALIASES: Record<string, string> = {
   resto: 'restoration', destro: 'destruction', affli: 'affliction',
   demo: 'demonology',   arc: 'arcane',
 };
+
+function eventLinkRow(guildId: string, eventId: string) {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setStyle(ButtonStyle.Link)
+      .setLabel('Open event (mark Interested)')
+      .setURL(`https://discord.com/events/${guildId}/${eventId}`)
+  );
+}
 function normSpec(s?: string) {
   let t = normToken(s);
   if (SPEC_ALIASES[t]) t = SPEC_ALIASES[t];
@@ -386,38 +395,23 @@ async function upsertSignupWithProfile(
     update: { role },
   });
 
-  // 2) Auto "Interested" on event
-  const shouldBeInterested = role !== 'ABSENT';
-  let interestedOk = true;
-
-  try {
-    const raid = await prisma.raid.findUnique({
+  // 2) Offer a link to the event so the user can mark "Interested" themselves
+  let components: ActionRowBuilder<ButtonBuilder>[] | undefined;
+  if (role !== 'ABSENT') {
+    const raidRow = await prisma.raid.findUnique({
       where: { raidId },
       select: { scheduledEventId: true },
     });
-    const hasEvent = !!raid?.scheduledEventId;
-
-    if (hasEvent) {
-      if (shouldBeInterested) {
-        // first attempt
-        interestedOk = await setEventInterestByRaidId(guild, raidId, i.user.id, true).catch(() => false);
-        if (!interestedOk) {
-          // one retry after 3s (Discord can lag right after event creation)
-          setTimeout(() => {
-            setEventInterestByRaidId(guild, raidId, i.user.id, true).catch(() => {});
-          }, 3000);
-        }
-      } else {
-        // remove Interested when leaving
-        await setEventInterestByRaidId(guild, raidId, i.user.id, false).catch(() => {});
-      }
-    } else {
-      // no event linked to this raid -> don't warn user
-      interestedOk = true;
+    if (raidRow?.scheduledEventId) {
+      components = [
+        new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder()
+            .setStyle(ButtonStyle.Link)
+            .setLabel('Open event (mark Interested)')
+            .setURL(`https://discord.com/events/${guild.id}/${raidRow.scheduledEventId}`)
+        ),
+      ];
     }
-  } catch (err) {
-    console.warn('[events] interested flow error:', (err as any)?.message ?? err);
-    interestedOk = false;
   }
 
   // 3) User feedback
@@ -426,12 +420,12 @@ async function upsertSignupWithProfile(
     content:
       `${emoji} Saved: **${role}** for **${i.user.username}**` +
       (classKey && specKey ? ` (${classKey}/${specKey}).` : '.') +
-      (!interestedOk && role !== 'ABSENT'
-        ? `\n⚠️ Nie udało się oznaczyć Cię jako *Interested* na evencie (spróbuję jeszcze raz za 3s).`
-        : ''),
+      (components ? `\nClick the button below to mark yourself as *Interested*.` : ''),
+    components,
     ephemeral: true,
   });
 }
+
 
 
 
