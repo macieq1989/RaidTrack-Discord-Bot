@@ -5,6 +5,7 @@ import { publishOrUpdateRaid } from './publishRaid.js';
 import { cfg } from '../config.js';
 import { deriveDifficultyFromPresetConfig } from './mapping.js';
 import { publishEPGPBoard } from './epgpBoard.js';
+import { publishLoot } from './publishLoot.js';
 
 // ---------- tiny logger ----------
 const dbg = (...args: any[]) => console.log('[SV]', ...args);
@@ -26,9 +27,6 @@ type NormalizedStatus = 'CREATED' | 'STARTED' | 'ENDED';
 function normalizeStatus(raw: any): NormalizedStatus | undefined {
   const s = String(raw ?? '').trim().toUpperCase();
   if (s === 'CREATED' || s === 'STARTED' || s === 'ENDED') return s;
-  // map legacy if needed:
-  // if (s === 'ACTIVE') return 'STARTED';
-  // if (s === 'FINISHED' || s === 'COMPLETED') return 'ENDED';
   return undefined;
 }
 
@@ -46,6 +44,10 @@ let lastPresetConfigMap: Record<
 > = {};
 
 const DEFAULT_DURATION_SEC = Number(process.env.RAID_EVENT_DEFAULT_DURATION_SEC ?? 3 * 3600);
+
+// anti-dup cache for loot
+let lastLootMaxTs: number = 0; // prefer timestamp
+let lastLootMaxId: number = 0; // fallback to id
 
 // ---------- Helpers ----------
 function unescapeLuaQuotedString(s: string): string {
@@ -81,10 +83,7 @@ function extractRaidInstancesFromLua(content: string): Array<Record<string, any>
   const m = reKey.exec(content);
   if (!m) return [];
 
-  // position right after the opening '{' of the value
   let i = (m.index ?? 0) + m[0].length;
-
-  // Find the matching closing '}' for the raidInstances block (brace counting)
   let depth = 1;
   let end = i;
   for (; end < content.length; end++) {
@@ -95,9 +94,8 @@ function extractRaidInstancesFromLua(content: string): Array<Record<string, any>
       if (depth === 0) { end++; break; }
     }
   }
-  const block = content.slice(i, end - 1); // inner of raidInstances { ... }
+  const block = content.slice(i, end - 1);
 
-  // Within the block, each top-level `{ ... }` is a raid entry. Collect them.
   const raids: string[] = [];
   let j = 0;
   while (j < block.length) {
@@ -115,25 +113,20 @@ function extractRaidInstancesFromLua(content: string): Array<Record<string, any>
         if (d === 0) { k++; break; }
       }
     }
-    raids.push(block.slice(j + 1, k - 1)); // inner of single raid { ... }
+    raids.push(block.slice(j + 1, k - 1));
     j = k;
   }
 
-  // Parse simple key/value pairs like ["name"] = "x", ["id"]=123,
   const parsed: Array<Record<string, any>> = [];
   for (const rb of raids) {
     const obj: Record<string, any> = {};
-    // Match ["key"] = value  OR  key = value
     const kvRe = /(?:\[\s*"?(?<k1>[A-Za-z0-9_]+)"?\s*\]|\b(?<k2>[A-Za-z_]\w*))\s*=\s*(?<v>[^,\n]+)\s*,?/g;
     let m2: RegExpExecArray | null;
     while ((m2 = kvRe.exec(rb)) !== null) {
       const key = (m2.groups?.k1 || m2.groups?.k2 || '').trim();
       let vRaw = (m2.groups?.v || '').trim();
-
-      // Trim possible trailing comments
       vRaw = vRaw.replace(/--.*$/, '').trim();
 
-      // Convert Lua literals to JS
       let value: any;
       if (vRaw.startsWith('"')) {
         const str = vRaw.replace(/^"/, '').replace(/"$/, '');
@@ -145,7 +138,6 @@ function extractRaidInstancesFromLua(content: string): Array<Record<string, any>
       } else if (/^[0-9]+(?:\.[0-9]+)?$/.test(vRaw)) {
         value = Number(vRaw);
       } else {
-        // unsupported nested table or unknown literal; skip
         continue;
       }
       obj[key] = value;
@@ -166,7 +158,6 @@ function extractRaidPresetsConfig(content: string): Record<
     { selectedDifficulty?: string; bosses?: Record<string, Record<string, number>> }
   > = {};
 
-  // find raidPresets = { ... } or ["raidPresets"] = { ... }
   const reRoot = /(?:\[\s*["']raidPresets["']\s*\]|\braidPresets\b)\s*=\s*{/;
   const m = reRoot.exec(content);
   if (!m) return result;
@@ -180,14 +171,12 @@ function extractRaidPresetsConfig(content: string): Record<
   }
   const block = content.slice(i, end - 1);
 
-  // iterate entries: ["<preset>"] = { ... }
   const entryRe = /\[\s*"([^"]+)"\s*\]\s*=\s*{/g;
   let em: RegExpExecArray | null;
   while ((em = entryRe.exec(block)) !== null) {
     const presetName = em[1].trim().toLowerCase();
     let j = em.index + em[0].length;
 
-    // balance to end of this preset object
     let d = 1, k = j;
     for (; k < block.length; k++) {
       const ch2 = block[k];
@@ -198,11 +187,9 @@ function extractRaidPresetsConfig(content: string): Record<
 
     const cfg: { selectedDifficulty?: string; bosses?: Record<string, Record<string, number>> } = {};
 
-    // selectedDifficulty = "Heroic"
     const dm = entry.match(/(?:\[\s*"selectedDifficulty"\s*\]|\bselectedDifficulty\b)\s*=\s*"([^"]+)"/i);
     if (dm) cfg.selectedDifficulty = dm[1].trim();
 
-    // bosses = { ["Boss"] = { ["Heroic"]=111, ["Normal"]=0, ... }, ... }
     const bossesRoot = /(?:\[\s*"bosses"\s*\]|\bbosses\b)\s*=\s*{/i.exec(entry);
     if (bossesRoot) {
       const bosses: Record<string, Record<string, number>> = {};
@@ -237,13 +224,13 @@ function extractRaidPresetsConfig(content: string): Record<
         }
         if (Object.keys(diffMap).length) bosses[bossName] = diffMap;
 
-        bossRe.lastIndex = bk; // jump past this boss
+        bossRe.lastIndex = bk;
       }
       if (Object.keys(bosses).length) cfg.bosses = bosses;
     }
 
     result[presetName] = cfg;
-    entryRe.lastIndex = k; // jump past this preset
+    entryRe.lastIndex = k;
   }
 
   return result;
@@ -251,7 +238,6 @@ function extractRaidPresetsConfig(content: string): Record<
 
 /** Map a minimal raid object from Lua -> our ingest format; difficulty from preset config */
 function mapLuaRaidToIngest(raid: Record<string, any>) {
-  // fields seen: id, name, started, ended, status, preset, scheduledAt, scheduledDate, presetName
   const raidId = String(raid.id ?? raid.name ?? `rt-${Date.now()}`);
   const raidTitle = String(raid.name ?? 'Raid');
 
@@ -261,18 +247,12 @@ function mapLuaRaidToIngest(raid: Record<string, any>) {
       ? lastPresetConfigMap[presetKey]
       : undefined;
 
-  // difficulty strictly derived from preset configuration
   const difficulty = deriveDifficultyFromPresetConfig(presetCfg);
-
   const startAt = Number(raid.started ?? raid.scheduledAt ?? 0);
-
-  // ensure endAt for Discord external events
   const endAt =
     raid.ended != null
       ? Number(raid.ended)
       : (startAt ? startAt + DEFAULT_DURATION_SEC : undefined);
-
-  // normalize status if present
   const status = normalizeStatus(raid.status);
 
   const notesParts: string[] = [];
@@ -285,28 +265,20 @@ function mapLuaRaidToIngest(raid: Record<string, any>) {
   return { raidId, raidTitle, difficulty, startAt, endAt, notes, status };
 }
 
-/** Extract EPGP from Lua SV:
- * RaidTrackDB = {
- *   ["epgpWipeID"] = 1755418727,
- *   ["epgp"] = { ["Alice"]={ep=124,gp=1}, ... }
- * }
- */
+/** Extract EPGP from Lua SV */
 function extractEPGPFromLua(content: string): {
   entries: Array<{ username: string; ep: number; gp: number; userId?: string }>;
   boardId?: string;
 } {
   const out: Array<{ username: string; ep: number; gp: number; userId?: string }> = [];
 
-  // boardId = epgpWipeID (opcjonalnie)
   const wipeM = /(?:\[\s*["']epgpWipeID["']\s*\]|\bepgpWipeID\b)\s*=\s*([0-9]+)/i.exec(content);
   const boardId = wipeM ? wipeM[1] : undefined;
 
-  // epgp = { ... } lub ["epgp"] = { ... }
   const rootRe = /(?:\[\s*["']epgp["']\s*\]|\bepgp\b)\s*=\s*{/i;
   const m = rootRe.exec(content);
   if (!m) return { entries: out, boardId };
 
-  // wytnij blok epgp { ... }
   let i = (m.index ?? 0) + m[0].length;
   let depth = 1, end = i;
   for (; end < content.length; end++) {
@@ -316,14 +288,12 @@ function extractEPGPFromLua(content: string): {
   }
   const block = content.slice(i, end - 1);
 
-  // iteruj ["Name"] = { ... }
   const entryRe = /\[\s*"([^"]+)"\s*\]\s*=\s*{/g;
   let em: RegExpExecArray | null;
   while ((em = entryRe.exec(block)) !== null) {
     const name = em[1];
     let j = em.index + em[0].length;
 
-    // balans wewnętrznej tabeli
     let d = 1, k = j;
     for (; k < block.length; k++) {
       const ch2 = block[k];
@@ -332,7 +302,6 @@ function extractEPGPFromLua(content: string): {
     }
     const inner = block.slice(j, k - 1);
 
-    // UWAGA: obsługa ["ep"] = 124 / ["gp"] = 1 i wariantów bez nawiasów
     const epm = /(?:\[\s*["']ep["']\s*\]|\bep\b)\s*=\s*([0-9]+(?:\.[0-9]+)?)/i.exec(inner);
     const gpm = /(?:\[\s*["']gp["']\s*\]|\bgp\b)\s*=\s*([0-9]+(?:\.[0-9]+)?)/i.exec(inner);
     const um  = /(?:\[\s*["']discordId["']\s*\]|\bdiscordId\b|\buserId\b)\s*=\s*"([^"]+)"/i.exec(inner);
@@ -350,6 +319,73 @@ function extractEPGPFromLua(content: string): {
   return { entries: out, boardId };
 }
 
+/** Extract lootHistory[] from Lua SV */
+function extractLootHistoryFromLua(content: string): Array<{
+  id?: number; player?: string; item?: string; boss?: string; gp?: number;
+  time?: string; timestamp?: number;
+}> {
+  const result: Array<any> = [];
+
+  // find lootHistory = { ... } or ["lootHistory"] = { ... }
+  const rootRe = /(?:\[\s*["']lootHistory["']\s*\]|\blootHistory\b)\s*=\s*{/i;
+  const m = rootRe.exec(content);
+  if (!m) return result;
+
+  let i = (m.index ?? 0) + m[0].length;
+  let depth = 1, end = i;
+  for (; end < content.length; end++) {
+    const ch = content[end];
+    if (ch === '{') depth++;
+    else if (ch === '}') { depth--; if (depth === 0) { end++; break; } }
+  }
+  const block = content.slice(i, end - 1);
+
+  // each entry is { ... }
+  let p = 0;
+  while (p < block.length) {
+    while (p < block.length && /[\s,]/.test(block[p])) p++;
+    if (p >= block.length) break;
+    if (block[p] !== '{') { p++; continue; }
+
+    let d = 1, q = p + 1;
+    for (; q < block.length; q++) {
+      const ch2 = block[q];
+      if (ch2 === '{') d++;
+      else if (ch2 === '}') { d--; if (d === 0) { q++; break; } }
+    }
+    const inner = block.slice(p + 1, q - 1);
+
+    const obj: any = {};
+    // keys like ["player"]="Macieq", ["item"]="|c...|Hitem:194308...|h[Manic Grieftorch]|h|r", ["gp"]=100, ["id"]=1, ["timestamp"]=1755433557, ["boss"]="Auction", ["time"]="13:25:57"
+    const kvRe = /(?:\[\s*"?(?<k1>[A-Za-z0-9_]+)"?\s*\]|\b(?<k2>[A-Za-z_]\w*))\s*=\s*(?<v>[^,\n]+)\s*,?/g;
+    let m2: RegExpExecArray | null;
+    while ((m2 = kvRe.exec(inner)) !== null) {
+      const key = (m2.groups?.k1 || m2.groups?.k2 || '').trim();
+      let vRaw = (m2.groups?.v || '').trim();
+      vRaw = vRaw.replace(/--.*$/, '').trim();
+
+      let value: any;
+      if (vRaw.startsWith('"')) {
+        const str = vRaw.replace(/^"/, '').replace(/"$/, '');
+        value = unescapeLuaQuotedString(str);
+      } else if (/^(true|false)$/i.test(vRaw)) {
+        value = /^true$/i.test(vRaw);
+      } else if (/^nil$/i.test(vRaw)) {
+        value = null;
+      } else if (/^[0-9]+(?:\.[0-9]+)?$/.test(vRaw)) {
+        value = Number(vRaw);
+      } else {
+        continue;
+      }
+      obj[key] = value;
+    }
+    if (Object.keys(obj).length) result.push(obj);
+
+    p = q;
+  }
+
+  return result;
+}
 
 // ---------- Poller ----------
 export function startSavedVariablesPoller(
@@ -370,6 +406,54 @@ export function startSavedVariablesPoller(
   status.intervalMs = intervalMs;
 
   let lastSig = '';
+
+  async function maybePublishLootArray(arr: any[]) {
+    if (!Array.isArray(arr) || arr.length === 0) return 0;
+
+    // filter only new entries (by timestamp first, fallback to id)
+    const fresh = arr.filter((e) => {
+      const ts = Number(e?.timestamp ?? 0);
+      const id = Number(e?.id ?? 0);
+      if (Number.isFinite(ts) && ts > 0) {
+        return ts > lastLootMaxTs;
+      }
+      return Number.isFinite(id) && id > lastLootMaxId;
+    });
+
+    // sort ascending by timestamp/id to post in order
+    fresh.sort((a, b) => {
+      const ta = Number(a?.timestamp ?? 0);
+      const tb = Number(b?.timestamp ?? 0);
+      if (ta && tb) return ta - tb;
+      const ia = Number(a?.id ?? 0);
+      const ib = Number(b?.id ?? 0);
+      return ia - ib;
+    });
+
+    let sent = 0;
+    for (const loot of fresh) {
+      try {
+        await publishLoot(client, {
+          id: Number(loot?.id ?? 0),
+          player: String(loot?.player ?? loot?.username ?? 'Unknown'),
+          item: String(loot?.item ?? ''),
+          boss: String(loot?.boss ?? ''),
+          gp: Number(loot?.gp ?? 0),
+          time: String(loot?.time ?? ''),
+          timestamp: Number(loot?.timestamp ?? 0),
+        });
+        const ts = Number(loot?.timestamp ?? 0);
+        const id = Number(loot?.id ?? 0);
+        if (Number.isFinite(ts) && ts > lastLootMaxTs) lastLootMaxTs = ts;
+        if (Number.isFinite(id) && id > lastLootMaxId) lastLootMaxId = id;
+        sent++;
+      } catch (e: any) {
+        console.warn('[SV] loot publish failed:', e?.message ?? e);
+      }
+    }
+    if (sent) dbg(`loot: published ${sent} new entr${sent === 1 ? 'y' : 'ies'}`);
+    return sent;
+  }
 
   async function tick() {
     status.lastCheck = new Date().toISOString();
@@ -414,7 +498,6 @@ export function startSavedVariablesPoller(
         let count = 0;
 
         const handleOne = async (packet: any) => {
-          // fallback to defaultGuildId if packet.guildId missing
           const gid = String(packet?.guildId || defaultGuildId || '').trim();
           if (!gid) {
             status.lastError = 'json: missing guildId and defaultGuildId';
@@ -423,9 +506,8 @@ export function startSavedVariablesPoller(
           }
           const guild: Guild = await client.guilds.fetch(gid);
 
-          // ---- EPGP board (optional, independent from raid)
+          // ---- EPGP board (optional)
           if (packet?.epgp) {
-            // normalize: accept array OR object map
             let entriesRaw = packet.epgp;
             if (entriesRaw && !Array.isArray(entriesRaw) && typeof entriesRaw === 'object') {
               entriesRaw = Object.entries(entriesRaw).map(([name, v]: any) => ({
@@ -463,18 +545,24 @@ export function startSavedVariablesPoller(
             }
           }
 
+          // ---- Loot (optional, independent)
+          if (packet?.lootHistory || packet?.loot) {
+            const lootArr = Array.isArray(packet.lootHistory)
+              ? packet.lootHistory
+              : (packet.loot ? [packet.loot] : []);
+            const sent = await maybePublishLootArray(lootArr);
+            count += sent;
+          }
+
           // ---- Raid publish/update (optional)
           if (packet?.raid) {
             const r = { ...packet.raid };
 
-            // status normalize (SV is source of truth)
             const normalized = normalizeStatus(r.status ?? r.state ?? r.raidStatus);
             if (normalized) r.status = normalized; else delete r.status;
 
-            // ensure endAt
             if (!r.endAt && r.startAt) r.endAt = Number(r.startAt) + DEFAULT_DURATION_SEC;
 
-            // difficulty fallback from preset
             if (!r.difficulty && r.presetName) {
               const presetCfg = lastPresetConfigMap[String(r.presetName).trim().toLowerCase()];
               r.difficulty = deriveDifficultyFromPresetConfig(presetCfg);
@@ -494,13 +582,12 @@ export function startSavedVariablesPoller(
 
         status.lastProcessedCount = count;
         if (count === 0) {
-          status.lastError = 'json parsed but nothing to publish (no epgp/raid entries)';
+          status.lastError = 'json parsed but nothing to publish (no epgp/loot/raid entries)';
           dbg('json: nothing published');
         }
         return;
       }
     } catch (e: any) {
-      // fallthrough to Lua parser
       status.lastError = `json parse failed: ${e.message}`;
     }
 
@@ -531,6 +618,17 @@ export function startSavedVariablesPoller(
         }
       } catch (e: any) {
         console.warn('[SV] EPGP(Lua) parse failed:', e?.message ?? e);
+      }
+
+      // --- Loot (independent)
+      try {
+        const loot = extractLootHistoryFromLua(text);
+        if (loot.length) {
+          const sent = await maybePublishLootArray(loot);
+          ops += sent;
+        }
+      } catch (e: any) {
+        console.warn('[SV] loot(Lua) parse failed:', e?.message ?? e);
       }
 
       // --- Raids

@@ -45,6 +45,9 @@ export const cfg = {
     MYTHIC: process.env.CH_MYTHIC || '',
   },
 
+  // Loot publikacja
+  lootChannel: process.env.CH_LOOT || '',
+
   // OAuth / Web
   publicUrl: process.env.PUBLIC_URL ?? '',
   oauth: {
@@ -64,6 +67,7 @@ export const cfg = {
   // External custom emoji (kept on a separate "emoji server")
   emojiGuildId: process.env.EMOJI_GUILD_ID ?? '',
   allowExternalEmoji: String(process.env.ALLOW_EXTERNAL_EMOJI ?? 'true') === 'true',
+
   // Map: "class_spec" (lowercase) -> emoji id or full token ("<:name:id>" / "<a:name:id>") or "a:ID"
   customEmoji: parseEmojiMap(),
 } as const;
