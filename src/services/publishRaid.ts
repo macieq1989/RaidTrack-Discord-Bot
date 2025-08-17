@@ -88,50 +88,68 @@ export async function publishOrUpdateRaid(guild: Guild, payload: RaidPayload) {
   const eventName = clampEventTitle(payload.raidTitle);
 
   if (CREATE_EVENTS) {
-    try {
-      const now = Math.floor(Date.now() / 1000);
-      const minFutureStart = now + 60; // Discord wymaga przyszłości; łapiemy poślizgi
-      const safeStartSec = Math.max(startSec, minFutureStart);
-      const safeEndSec = Math.max(endSec, safeStartSec + 60); // min. 1 minuta trwania
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    const minFutureStart = now + 60; // złap ewentualny poślizg
+    const safeStartSec = Math.max(startSec, minFutureStart);
+    const safeEndSec = Math.max(endSec, safeStartSec + 60); // min. 1 minuta trwania
+    const requestedStatus = String(payload.status ?? '').toUpperCase(); // CREATED/STARTED/ENDED
 
-      if (eventId) {
-        const ev = await guild.scheduledEvents.fetch(eventId).catch(() => null);
-        if (ev) {
+    if (eventId) {
+      const ev = await guild.scheduledEvents.fetch(eventId).catch(() => null);
+      if (ev) {
+        if (ev.status === GuildScheduledEventStatus.Scheduled) {
+          // Scheduled: wolno zmieniać start + end
           await ev.edit({
             name: eventName,
+            description: payload.notes || '',
             scheduledStartTime: new Date(safeStartSec * 1000),
             scheduledEndTime: new Date(safeEndSec * 1000),
-            description: payload.notes || '',
           }).catch((e: any) => {
-            console.warn('[events] edit failed:', e?.status ?? '', e?.message ?? e?.rawError ?? e);
+            console.warn('[events] edit(Scheduled) failed:', e?.status ?? '', e?.message ?? e?.rawError ?? e);
+          });
+        } else if (ev.status === GuildScheduledEventStatus.Active) {
+          // Active: NIE dotykamy startu; wolno zmienić end + nazwę/opis
+          await ev.edit({
+            name: eventName,
+            description: payload.notes || '',
+            scheduledEndTime: new Date(safeEndSec * 1000),
+          }).catch((e: any) => {
+            console.warn('[events] edit(Active) failed:', e?.status ?? '', e?.message ?? e?.rawError ?? e);
           });
         } else {
-          console.warn('[events] stale scheduledEventId in DB, will recreate:', eventId);
+          // Completed/Canceled: nie da się zmienić czasów — przygotuj się na stworzenie nowego
+          console.warn('[events] finished/canceled — will recreate new one');
           eventId = null;
         }
+      } else {
+        console.warn('[events] stale scheduledEventId in DB, will recreate:', eventId);
+        eventId = null;
       }
-
-      if (!eventId) {
-        const ev = await guild.scheduledEvents.create({
-          name: eventName,
-          scheduledStartTime: new Date(safeStartSec * 1000),
-          scheduledEndTime: new Date(safeEndSec * 1000),
-          privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly,
-          entityType: GuildScheduledEventEntityType.External,
-          entityMetadata: { location: 'In-game (WoW)' },
-          description: payload.notes || '',
-        }).catch((e: any) => {
-          console.warn('[events] create failed:', e?.status ?? '', e?.message ?? e?.rawError ?? e);
-          return null;
-        });
-        if (ev) eventId = ev.id;
-      }
-    } catch (e: any) {
-      console.warn('[events] unexpected error:', e?.status ?? '', e?.message ?? e);
     }
-  } else {
-    console.log('[events] CREATE_EVENTS=false — skipping event creation');
+
+    // Tworzymy NOWY event tylko jeśli raid nie jest ENDED
+    if (!eventId && requestedStatus !== 'ENDED') {
+      const ev = await guild.scheduledEvents.create({
+        name: eventName,
+        scheduledStartTime: new Date(safeStartSec * 1000),
+        scheduledEndTime: new Date(safeEndSec * 1000),
+        privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly,
+        entityType: GuildScheduledEventEntityType.External,
+        entityMetadata: { location: 'In-game (WoW)' },
+        description: payload.notes || '',
+      }).catch((e: any) => {
+        console.warn('[events] create failed:', e?.status ?? '', e?.message ?? e?.rawError ?? e);
+        return null;
+      });
+      if (ev) eventId = ev.id;
+    }
+  } catch (e: any) {
+    console.warn('[events] unexpected error:', e?.status ?? '', e?.message ?? e);
   }
+} else {
+  console.log('[events] CREATE_EVENTS=false — skipping event creation');
+}
 
   // ---- persist msg/event ids
   await prisma.raid.update({

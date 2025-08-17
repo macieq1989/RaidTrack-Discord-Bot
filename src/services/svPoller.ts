@@ -6,6 +6,8 @@ import { cfg } from '../config.js';
 import { deriveDifficultyFromPresetConfig } from './mapping.js';
 import { publishEPGPBoard } from './epgpBoard.js';
 
+// ---------- tiny logger ----------
+const dbg = (...args: any[]) => console.log('[SV]', ...args);
 
 // ---------- Types & status normalization ----------
 export type SVPollerStatus = {
@@ -24,7 +26,7 @@ type NormalizedStatus = 'CREATED' | 'STARTED' | 'ENDED';
 function normalizeStatus(raw: any): NormalizedStatus | undefined {
   const s = String(raw ?? '').trim().toUpperCase();
   if (s === 'CREATED' || s === 'STARTED' || s === 'ENDED') return s;
-  // map any legacy/custom values here if addon exports differently:
+  // map legacy if needed:
   // if (s === 'ACTIVE') return 'STARTED';
   // if (s === 'FINISHED' || s === 'COMPLETED') return 'ENDED';
   return undefined;
@@ -283,6 +285,70 @@ function mapLuaRaidToIngest(raid: Record<string, any>) {
   return { raidId, raidTitle, difficulty, startAt, endAt, notes, status };
 }
 
+/** Extract EPGP from Lua SV:
+ * RaidTrackDB = {
+ *   ["epgpWipeID"] = 1755418727,
+ *   ["epgp"] = { ["Alice"]={ep=124,gp=1}, ... }
+ * }
+ */
+function extractEPGPFromLua(content: string): {
+  entries: Array<{ username: string; ep: number; gp: number; userId?: string }>;
+  boardId?: string;
+} {
+  const out: Array<{ username: string; ep: number; gp: number; userId?: string }> = [];
+
+  // boardId = epgpWipeID (optional)
+  const wipeM = /(?:\[\s*["']epgpWipeID["']\s*\]|\bepgpWipeID\b)\s*=\s*([0-9]+)/i.exec(content);
+  const boardId = wipeM ? wipeM[1] : undefined;
+
+  // find epgp = { ... } or ["epgp"] = { ... }
+  const rootRe = /(?:\[\s*["']epgp["']\s*\]|\bepgp\b)\s*=\s*{/i;
+  const m = rootRe.exec(content);
+  if (!m) return { entries: out, boardId };
+
+  // isolate inner block of epgp { ... }
+  let i = (m.index ?? 0) + m[0].length;
+  let depth = 1, end = i;
+  for (; end < content.length; end++) {
+    const ch = content[end];
+    if (ch === '{') depth++;
+    else if (ch === '}') { depth--; if (depth === 0) { end++; break; } }
+  }
+  const block = content.slice(i, end - 1);
+
+  // iterate ["Name"] = { ... }
+  const entryRe = /\[\s*"([^"]+)"\s*\]\s*=\s*{/g;
+  let em: RegExpExecArray | null;
+  while ((em = entryRe.exec(block)) !== null) {
+    const name = em[1];
+    let j = em.index + em[0].length;
+
+    // balance inner table
+    let d = 1, k = j;
+    for (; k < block.length; k++) {
+      const ch2 = block[k];
+      if (ch2 === '{') d++;
+      else if (ch2 === '}') { d--; if (d === 0) { k++; break; } }
+    }
+    const inner = block.slice(j, k - 1);
+
+    // read ep/gp (case-insensitive), optional discordId/userId
+    const epm = /(?:\bEP\b|\bep\b)\s*=\s*([0-9]+(?:\.[0-9]+)?)/.exec(inner);
+    const gpm = /(?:\bGP\b|\bgp\b)\s*=\s*([0-9]+(?:\.[0-9]+)?)/.exec(inner);
+    const um  = /(?:\[\s*["']discordId["']\s*\]|\bdiscordId\b|\buserId\b)\s*=\s*"([^"]+)"/.exec(inner);
+
+    const ep = epm ? Number(epm[1]) : NaN;
+    const gp = gpm ? Number(gpm[1]) : NaN;
+    if (Number.isFinite(ep) && Number.isFinite(gp)) {
+      out.push({ username: name, ep, gp, userId: um?.[1] });
+    }
+
+    entryRe.lastIndex = k;
+  }
+
+  return { entries: out, boardId };
+}
+
 // ---------- Poller ----------
 export function startSavedVariablesPoller(
   client: Client,
@@ -338,133 +404,163 @@ export function startSavedVariablesPoller(
       // non-fatal
     }
 
-   // Mode A: JSON export under SV key
-try {
-  const json = tryExtractJsonExport(text, key);
-  if (json) {
-    status.mode = 'json';
-    let count = 0;
+    // Mode A: JSON export under SV key
+    try {
+      const json = tryExtractJsonExport(text, key);
+      if (json) {
+        status.mode = 'json';
+        let count = 0;
 
-    const handleOne = async (packet: any) => {
-      const gid = String(packet?.guildId || '').trim();
-      if (!gid) return;
+        const handleOne = async (packet: any) => {
+          // fallback to defaultGuildId if packet.guildId missing
+          const gid = String(packet?.guildId || defaultGuildId || '').trim();
+          if (!gid) {
+            status.lastError = 'json: missing guildId and defaultGuildId';
+            dbg('json: skip (no guildId/defaultGuildId)');
+            return;
+          }
+          const guild: Guild = await client.guilds.fetch(gid);
 
-      const guild: Guild = await client.guilds.fetch(gid);
+          // ---- EPGP board (optional, independent from raid)
+          if (packet?.epgp) {
+            // normalize: accept array OR object map
+            let entriesRaw = packet.epgp;
+            if (entriesRaw && !Array.isArray(entriesRaw) && typeof entriesRaw === 'object') {
+              entriesRaw = Object.entries(entriesRaw).map(([name, v]: any) => ({
+                username: String(name),
+                ep: Number(v?.ep ?? v?.EP ?? 0),
+                gp: Number(v?.gp ?? v?.GP ?? 0),
+                userId: v?.userId ?? v?.discordId,
+              }));
+            }
 
-      // ---- EPGP board (optional)
-      if (packet?.epgp) {
-        // normalize: allow array OR object map
-        let entriesRaw = packet.epgp;
-        if (entriesRaw && !Array.isArray(entriesRaw) && typeof entriesRaw === 'object') {
-          entriesRaw = Object.entries(entriesRaw).map(([name, v]: any) => ({
-            username: String(name),
-            ep: Number(v?.ep ?? v?.EP ?? 0),
-            gp: Number(v?.gp ?? v?.GP ?? 0),
-            userId: v?.userId ?? v?.discordId,
-          }));
+            const entries = (Array.isArray(entriesRaw) ? entriesRaw : [])
+              .map((e: any) => ({
+                username: String(e?.username ?? e?.name ?? e?.player ?? 'Unknown'),
+                ep: Number(e?.ep ?? e?.EP ?? 0),
+                gp: Number(e?.gp ?? e?.GP ?? 0),
+                userId: e?.userId ?? e?.discordId,
+              }))
+              .filter((e: any) => Number.isFinite(e.ep) && Number.isFinite(e.gp));
+
+            const boardId =
+              packet?.epgpId ??
+              packet?.epgp?.id ??
+              packet?.epgp?.messageId ??
+              packet?.boardId ??
+              packet?.epgpMessageId;
+
+            if (entries.length) {
+              dbg(`json: publish EPGP (${entries.length}) boardId=${boardId ?? '—'}`);
+              await publishEPGPBoard(guild, entries, { boardId }).catch((e: any) => {
+                console.warn('[SV] EPGP publish failed:', e?.message ?? e);
+              });
+              count++;
+            } else {
+              dbg('json: epgp present but no valid entries');
+            }
+          }
+
+          // ---- Raid publish/update (optional)
+          if (packet?.raid) {
+            const r = { ...packet.raid };
+
+            // status normalize (SV is source of truth)
+            const normalized = normalizeStatus(r.status ?? r.state ?? r.raidStatus);
+            if (normalized) r.status = normalized; else delete r.status;
+
+            // ensure endAt
+            if (!r.endAt && r.startAt) r.endAt = Number(r.startAt) + DEFAULT_DURATION_SEC;
+
+            // difficulty fallback from preset
+            if (!r.difficulty && r.presetName) {
+              const presetCfg = lastPresetConfigMap[String(r.presetName).trim().toLowerCase()];
+              r.difficulty = deriveDifficultyFromPresetConfig(presetCfg);
+            }
+
+            dbg(`json: publish raid ${r.raidId ?? r.raidTitle ?? ''}`);
+            await publishOrUpdateRaid(guild, r);
+            count++;
+          }
+        };
+
+        if (Array.isArray(json)) {
+          for (const item of json) await handleOne(item);
+        } else {
+          await handleOne(json);
         }
 
-        const entries = (Array.isArray(entriesRaw) ? entriesRaw : [])
-          .map((e: any) => ({
-            username: String(e?.username ?? e?.name ?? e?.player ?? 'Unknown'),
-            ep: Number(e?.ep ?? e?.EP ?? 0),
-            gp: Number(e?.gp ?? e?.GP ?? 0),
-            userId: e?.userId ?? e?.discordId,
-          }))
-          .filter((e: any) => Number.isFinite(e.ep) && Number.isFinite(e.gp));
-
-        // board "revision" id — nowy id => nowy post, ten sam => edytuj
-        const boardId =
-          packet?.epgpId ??
-          packet?.epgp?.id ??
-          packet?.epgp?.messageId ??
-          packet?.boardId ??
-          packet?.epgpMessageId;
-
-        if (entries.length) {
-          await publishEPGPBoard(guild, entries, { boardId }).catch((e: any) => {
-            console.warn('[SV] EPGP publish failed:', e?.message ?? e);
-          });
-          count++;
+        status.lastProcessedCount = count;
+        if (count === 0) {
+          status.lastError = 'json parsed but nothing to publish (no epgp/raid entries)';
+          dbg('json: nothing published');
         }
+        return;
       }
-
-      // ---- Raid publish/update (optional)
-      if (packet?.raid) {
-        const r = { ...packet.raid };
-
-        // status normalize (SV is source of truth)
-        const normalized = normalizeStatus(r.status ?? r.state ?? r.raidStatus);
-        if (normalized) r.status = normalized; else delete r.status;
-
-        // ensure endAt
-        if (!r.endAt && r.startAt) r.endAt = Number(r.startAt) + DEFAULT_DURATION_SEC;
-
-        // difficulty fallback from preset
-        if (!r.difficulty && r.presetName) {
-          const presetCfg = lastPresetConfigMap[String(r.presetName).trim().toLowerCase()];
-          r.difficulty = deriveDifficultyFromPresetConfig(presetCfg);
-        }
-
-        await publishOrUpdateRaid(guild, r);
-        count++;
-      }
-    };
-
-    if (Array.isArray(json)) {
-      for (const item of json) await handleOne(item);
-    } else {
-      await handleOne(json);
+    } catch (e: any) {
+      // fallthrough to Lua parser
+      status.lastError = `json parse failed: ${e.message}`;
     }
 
-    status.lastProcessedCount = count;
-    return;
-  }
-} catch (e: any) {
-  // fallthrough to Lua parser
-  status.lastError = `json parse failed: ${e.message}`;
-}
-
-
-    // Mode B: Lua RaidTrackDB.raidInstances
+    // Mode B: Lua
     try {
       status.mode = 'lua';
+      let ops = 0;
+
+      // --- EPGP (independent)
+      try {
+        const { entries, boardId } = extractEPGPFromLua(text);
+        if (entries?.length) {
+          const gid = String(
+            process.env.GUILD_ID_DEFAULT ||
+            (cfg as any)?.guildId ||
+            (cfg as any)?.allowedGuildId || ''
+          ).trim();
+          if (!gid) {
+            console.warn('[SV] EPGP(Lua) present but no defaultGuildId; set GUILD_ID_DEFAULT or cfg.guildId');
+          } else {
+            const guild: Guild = await client.guilds.fetch(gid);
+            dbg(`lua: publish EPGP (${entries.length}) boardId=${boardId ?? '—'}`);
+            await publishEPGPBoard(guild, entries, { boardId }).catch((e: any) => {
+              console.warn('[SV] EPGP(Lua) publish failed:', e?.message ?? e);
+            });
+            ops++;
+          }
+        }
+      } catch (e: any) {
+        console.warn('[SV] EPGP(Lua) parse failed:', e?.message ?? e);
+      }
+
+      // --- Raids
       const raids = extractRaidInstancesFromLua(text);
-      if (!raids.length) {
-        status.lastError = 'raidInstances not found or empty in Lua SV';
-        return;
-      }
-
-      if (!defaultGuildId) {
-        status.lastError =
-          'no default guildId (set GUILD_ID_DEFAULT or cfg.guildId/allowedGuildId)';
-        return;
-      }
-
-      let count = 0;
-      for (const r of raids) {
-        const payload = mapLuaRaidToIngest(r);
-        if (!payload.startAt) {
-          console.warn('[SV] skip raid (no startAt):', payload.raidId ?? payload.raidTitle);
-          continue;
-        }
-        try {
+      if (raids.length) {
+        if (!defaultGuildId) {
+          status.lastError = 'no default guildId (set GUILD_ID_DEFAULT or cfg.guildId/allowedGuildId)';
+        } else {
           const guild: Guild = await client.guilds.fetch(String(defaultGuildId));
-          await publishOrUpdateRaid(guild, payload as any);
-          count++;
-        } catch (e: any) {
-          console.warn(
-            `[SV] skip raid due to mapping/publish error (raidId=${payload.raidId}):`,
-            e?.message ?? e
-          );
+          for (const r of raids) {
+            const payload = mapLuaRaidToIngest(r);
+            if (!payload.startAt) {
+              console.warn('[SV] skip raid (no startAt):', payload.raidId ?? payload.raidTitle);
+              continue;
+            }
+            try {
+              await publishOrUpdateRaid(guild, payload as any);
+              ops++;
+            } catch (e: any) {
+              console.warn(`[SV] skip raid (raidId=${payload.raidId}):`, e?.message ?? e);
+            }
+          }
         }
+      } else if (ops === 0) {
+        status.lastError = 'raidInstances not found or empty in Lua SV';
       }
-      status.lastProcessedCount = count;
-      if (!count) status.lastError = 'no valid raids mapped from Lua SV';
+
+      status.lastProcessedCount = ops;
     } catch (e: any) {
       status.lastError = `lua parse/publish failed: ${e.message}`;
     }
-  }
+  } // <-- end of tick()
 
   const timer = setInterval(tick, intervalMs);
   // initial run
