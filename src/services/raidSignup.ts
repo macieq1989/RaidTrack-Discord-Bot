@@ -12,6 +12,8 @@ import {
 } from './playerProfile.js';
 import { setEventInterestByRaidId } from './eventInterest.js';
 
+const sleep = (ms: number) => new Promise(res => setTimeout(res, ms));
+
 export type RoleKey = 'TANK'|'HEALER'|'MELEE'|'RANGED'|'MAYBE'|'ABSENT';
 
 // ---------- normalizacja + emoji helpery ----------
@@ -377,24 +379,65 @@ async function upsertSignupWithProfile(
   specKey?: string,
   _updateMessage = false
 ) {
+  // 1) Save/Update signup
   await prisma.signup.upsert({
     where: { raidId_userId: { raidId, userId: i.user.id } },
     create: { raidId, userId: i.user.id, username: i.user.username, role },
     update: { role },
   });
 
-  // Auto "Interested" on event (role != ABSENT), else remove
-  const shouldBeInterested = role !== 'ABSENT';
-  await setEventInterestByRaidId(guild, raidId, i.user.id, shouldBeInterested).catch(() => {});
+  // 2) Auto "Interested" on event iff role != ABSENT and event is active/upcoming
+  let interestedOk = true; // default optimistic
+  try {
+    const raid = await prisma.raid.findUnique({
+      where: { raidId },
+      select: { scheduledEventId: true },
+    });
 
-  
+    const shouldBeInterested = role !== 'ABSENT';
+    const eventId = raid?.scheduledEventId ?? null;
 
+    if (eventId && shouldBeInterested) {
+      // fetch event to ensure it's not Completed/Canceled
+      const ev = await guild.scheduledEvents.fetch(eventId).catch(() => null);
+      const canMark =
+        !!ev &&
+        ev.status !== GuildScheduledEventStatus.Completed &&
+        ev.status !== GuildScheduledEventStatus.Canceled;
+
+      if (canMark) {
+        // one try + quick retry (Discord can lag a bit)
+        interestedOk = await setEventInterestByRaidId(guild, raidId, i.user.id, true);
+        if (!interestedOk) {
+          await sleep(500);
+          interestedOk = await setEventInterestByRaidId(guild, raidId, i.user.id, true);
+        }
+      } else {
+        // event not suitable for interest
+        interestedOk = false;
+      }
+    } else if (eventId && !shouldBeInterested) {
+      // remove Interested when ABSENT
+      await setEventInterestByRaidId(guild, raidId, i.user.id, false).catch(() => {});
+    }
+  } catch (err) {
+    console.warn('[events] interested flow error:', (err as any)?.message ?? err);
+    interestedOk = false;
+  }
+
+  // 3) Feedback for user
   const emoji = (classKey && specKey) ? classSpecEmoji(classKey, specKey, role) : '✅';
   await i.reply({
-    content: `${emoji} Saved: **${role}** for **${i.user.username}**${classKey && specKey ? ` (${classKey}/${specKey}).` : '.'}`,
+    content:
+      `${emoji} Saved: **${role}** for **${i.user.username}**` +
+      (classKey && specKey ? ` (${classKey}/${specKey}).` : '.') +
+      (!interestedOk && role !== 'ABSENT'
+        ? `\n⚠️ Nie udało się oznaczyć Cię jako *Interested* na evencie (może być opóźnienie Discorda lub event jest zamknięty).`
+        : ''),
     ephemeral: true,
   });
 }
+
 
 export async function refreshSignupMessage(guild: Guild, raidId: string) {
   const raid = await prisma.raid.findUnique({ where: { raidId } });
